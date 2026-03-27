@@ -7,8 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:firebase_database/firebase_database.dart';
-import 'package:firebase_auth/firebase_auth.dart';
-import 'package:geolocator/geolocator.dart' hide PermissionStatus;
+import 'package:geolocator/geolocator.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'login_screen.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -36,9 +35,6 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
   LatLng _myPosition = const LatLng(35.6812, 139.7671);
   bool _isRecording = false;
   bool _isOtherRecording = false;
-  DateTime? _backgroundTime;
-  Timer? _backgroundTimer;
-  bool _wasOfflineDuringBackground = false;
   Timer? _expiryTimer;
   String _remainingTime = '';
   Timer? _countdownTimer;
@@ -125,96 +121,6 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
       debugPrint('Agora初期化エラー: $e');
     }
   }
-
-
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.paused) {
-      _backgroundTime = DateTime.now();
-      _backgroundTimer = Timer(const Duration(minutes: 1), () async {
-        await _db.child('rooms/${widget.roomCode}/members/${widget.userId}')
-            .update({'online': false});
-        _wasOfflineDuringBackground = true;
-      });
-      Timer(const Duration(minutes: 3), () async {
-        await _db.child('rooms/${widget.roomCode}/members/${widget.userId}').remove();
-        if (mounted) {
-          Navigator.pushReplacement(
-            context,
-            MaterialPageRoute(builder: (_) => const LoginScreen()),
-          );
-        }
-      });
-    } else if (state == AppLifecycleState.resumed) {
-      _backgroundTimer?.cancel();
-    _expiryTimer?.cancel();
-    _countdownTimer?.cancel();
-      // Firebaseのlast_seenをチェック
-      _checkLastSeen();
-    }
-  }
-
-  Future<void> _checkLastSeen() async {
-    try {
-      final snap = await _db
-          .child('rooms/${widget.roomCode}/members/${widget.userId}/last_seen')
-          .get();
-      if (snap.value == null) return;
-      final lastSeen = snap.value as int;
-      final diff = DateTime.now().millisecondsSinceEpoch - lastSeen;
-      final minutes = diff ~/ 60000;
-
-      if (minutes >= 30) {
-        // 30分以上 → 自動退出
-        await _db.child('rooms/${widget.roomCode}/members/${widget.userId}').remove();
-        if (mounted) {
-          Navigator.pushReplacement(
-            context,
-            MaterialPageRoute(builder: (_) => const LoginScreen()),
-          );
-        }
-      } else if (minutes >= 1) {
-        // 1分以上（テスト用）→ ダイアログ
-        if (mounted) {
-          showDialog(
-            context: context,
-            barrierDismissible: false,
-            builder: (_) => AlertDialog(
-              backgroundColor: const Color(0xFF1E1E2E),
-              title: const Text('GPS情報が未送信でした',
-                  style: TextStyle(color: Colors.white)),
-              content: Text('${minutes}分間バックグラウンドでした。\n続けますか？',
-                  style: const TextStyle(color: Colors.white70)),
-              actions: [
-                TextButton(
-                  onPressed: () async {
-                    Navigator.pop(context);
-                    await _updateLocation();
-                  },
-                  child: const Text('再開する',
-                      style: TextStyle(color: Colors.blue)),
-                ),
-                TextButton(
-                  onPressed: () {
-                    Navigator.pop(context);
-                    _db.child('rooms/${widget.roomCode}/members/${widget.userId}').remove();
-                    Navigator.pushReplacement(
-                      context,
-                      MaterialPageRoute(builder: (_) => const LoginScreen()),
-                    );
-                  },
-                  child: const Text('退出する',
-                      style: TextStyle(color: Colors.red)),
-                ),
-              ],
-            ),
-          );
-        }
-      }
-    } catch (e) {
-      debugPrint('last_seenチェックエラー: $e');
-    }
-  }
   Future<void> _startExpiryCheck() async {
     final snapshot = await _db.child('rooms/${widget.roomCode}/info/expires_at').get();
     if (!mounted) return;
@@ -295,10 +201,7 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
     _db.child('rooms/${widget.roomCode}/recording_user').onValue.listen((event) {
       final val = event.snapshot.value as String?;
       final otherNick = val != null && val != widget.userId
-          ? (_members.values
-              .where((m) => (m as Map)['nickname'] != null)
-              .map((m) => (m as Map)['nickname'] as String)
-              .firstOrNull ?? '他のユーザー')
+          ? ((_members[val] as Map?)?['nickname'] as String? ?? '他のユーザー')
           : '';
       if (mounted) {
         setState(() {
