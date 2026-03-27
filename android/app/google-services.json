@@ -1,0 +1,30 @@
+{
+  "project_info": {
+    "project_number": "443481896764",
+    "firebase_url": "https://drivelink-a7ffb-default-rtdb.asia-southeast1.firebasedatabase.app",
+    "project_id": "drivelink-a7ffb",
+    "storage_bucket": "drivelink-a7ffb.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:443481896764:android:da3e3f9cf0ebd21cead039",
+        "android_client_info": {
+          "package_name": "com.example.drivelink"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyD2bZKA-7v6ZzHSnZlMYH_0s7UemBUSOjs"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
