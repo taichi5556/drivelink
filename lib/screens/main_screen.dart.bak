@@ -55,14 +55,16 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
   StreamSubscription? _membersSubscription;
 
   // 目的地関連
+  LatLng? _personalDestination;
   LatLng? _groupDestination;
+  String _personalDestName = '';
   String _groupDestName = '';
   StreamSubscription? _destSubscription;
   Set<Polyline> _polylines = {}; // ルート線
   StreamSubscription? _appLinkSubscription;
   final _appLinks = AppLinks();
-  LatLng? get _activeDestination => _groupDestination;
-  String get _activeDestName => _groupDestName;
+  LatLng? get _activeDestination => _personalDestination ?? _groupDestination;
+  String get _activeDestName => _personalDestination != null ? _personalDestName : _groupDestName;
 
   // Agora
   RtcEngine? _agoraEngine;
@@ -290,8 +292,8 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
     if (lat != null && lng != null) {
       if (!mounted) return;
       setState(() {
-        _groupDestination = LatLng(lat!, lng!);
-        _groupDestName = name;
+        _personalDestination = LatLng(lat!, lng!);
+        _personalDestName = name;
       });
       _updateDestinationMarker();
       // 目的地にカメラを移動
@@ -333,7 +335,37 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
       final senderUid = data['senderUid'] as String? ?? '';
       if (lat == null || lng == null) return;
       final newDest = LatLng(lat, lng);
-      if (senderUid != widget.userId) {
+      // ケース1：個人目的地あり → グループ共有が届いた
+      if (_personalDestination != null && senderUid != widget.userId) {
+        showDialog(
+          context: context,
+          builder: (_) => AlertDialog(
+            backgroundColor: const Color(0xFF0D1B2A),
+            title: const Text('📍 新しい目的地が共有されました', style: TextStyle(color: Colors.white)),
+            content: Text('「$name」\nグループの目的地に切り替えますか？', style: const TextStyle(color: Colors.white70)),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('個人目的地を維持', style: TextStyle(color: Colors.grey)),
+              ),
+              TextButton(
+                onPressed: () {
+                  Navigator.pop(context);
+                  setState(() {
+                    _personalDestination = null;
+                    _personalDestName = '';
+                    _groupDestination = newDest;
+                    _groupDestName = name;
+                  });
+                  _updateDestinationMarker();
+                },
+                child: const Text('切り替える', style: TextStyle(color: Color(0xFF00D4FF))),
+              ),
+            ],
+          ),
+        );
+      } else if (senderUid != widget.userId) {
+        // ケース2：グループ共有のみ更新
         setState(() {
           _groupDestination = newDest;
           _groupDestName = name;
@@ -352,7 +384,11 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
         _markers.add(Marker(
           markerId: const MarkerId('destination'),
           position: dest,
-          icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueBlue),
+          icon: BitmapDescriptor.defaultMarkerWithHue(
+            _personalDestination != null
+                ? BitmapDescriptor.hueRed
+                : BitmapDescriptor.hueBlue,
+          ),
           infoWindow: InfoWindow(title: name),
         ));
         _fetchRoute(dest); // ルート取得
@@ -385,7 +421,7 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
             Polyline(
               polylineId: const PolylineId('route'),
               points: coords,
-              color: const Color(0xFF1565C0),
+              color: const Color(0xFF00D4FF),
               width: 5,
             ),
           };
@@ -496,15 +532,25 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
                           leading: const Icon(Icons.place, color: Color(0xFF00D4FF)),
                           title: Text(r['name'], style: const TextStyle(color: Colors.white, fontSize: 14)),
                           subtitle: Text(r['address'], style: const TextStyle(color: Colors.grey, fontSize: 11), maxLines: 1, overflow: TextOverflow.ellipsis),
-                          onTap: () async {
+                          onTap: () {
                             setState(() {
-                              _groupDestination = LatLng(r['lat'], r['lng']);
-                              _groupDestName = r['name'];
+                              _personalDestination = LatLng(r['lat'], r['lng']);
+                              _personalDestName = r['name'];
                             });
                             _updateDestinationMarker();
-                            Navigator.pop(ctx);
-                            await _shareGroupDestination();
                             _animateCamera(CameraUpdate.newLatLngZoom(LatLng(r['lat'], r['lng']), 14), programmatic: true);
+                            Navigator.pop(ctx);
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text('📍 「${r["name"]}」を目的地に設定しました'),
+                                backgroundColor: const Color(0xFF1A3A5C),
+                                action: SnackBarAction(
+                                  label: 'グループに共有',
+                                  textColor: const Color(0xFF00D4FF),
+                                  onPressed: _shareGroupDestination,
+                                ),
+                              ),
+                            );
                           },
                         );
                       },
@@ -518,8 +564,8 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
                     label: const Text('現在地を目的地に設定', style: TextStyle(color: Color(0xFF00D4FF))),
                     onPressed: () {
                       setState(() {
-                        _groupDestination = _myPosition;
-                        _groupDestName = '現在地';
+                        _personalDestination = _myPosition;
+                        _personalDestName = '現在地';
                       });
                       _updateDestinationMarker();
                       Navigator.pop(ctx);
@@ -529,10 +575,10 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
             ),
           ),
           actions: [
-            if (_groupDestination != null)
+            if (_personalDestination != null)
               TextButton(
                 onPressed: () {
-                  setState(() { _groupDestination = null; _groupDestName = ''; });
+                  setState(() { _personalDestination = null; _personalDestName = ''; });
                   _updateDestinationMarker();
                   Navigator.pop(ctx);
                 },
@@ -549,7 +595,7 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
   }
 
   Future<void> _shareGroupDestination() async {
-    if (_groupDestination == null) {
+    if (_personalDestination == null && _groupDestination == null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('先に目的地を設定してください'), backgroundColor: Colors.redAccent),
       );
@@ -882,31 +928,30 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
                 children: [
                   FloatingActionButton.small(
                     heroTag: 'dest_btn',
-                    backgroundColor: _polylines.isNotEmpty
-                        ? Colors.redAccent
+                    backgroundColor: _personalDestination != null
+                        ? Colors.red
                         : _groupDestination != null
                             ? const Color(0xFF1E90FF)
                             : const Color(0xFF1A3A5C),
-                    onPressed: _polylines.isNotEmpty
-                        ? () {
-                            setState(() {
-                              _groupDestination = null;
-                              _groupDestName = '';
-                              _polylines = {};
-                            });
-                            _updateDestinationMarker();
-                          }
-                        : _setPersonalDestination,
-                    child: Icon(
-                      _polylines.isNotEmpty ? Icons.stop : Icons.place,
-                      color: Colors.white,
-                    ),
+                    onPressed: _setPersonalDestination,
+                    child: const Icon(Icons.place, color: Colors.white),
                   ),
                   const SizedBox(height: 4),
                   Text(
-                    _polylines.isNotEmpty ? '終了' : _groupDestination != null ? '共有' : '目的地',
+                    _personalDestination != null ? '個人' : _groupDestination != null ? '共有' : '目的地',
                     style: const TextStyle(color: Colors.white70, fontSize: 10),
                   ),
+                  if (_activeDestination != null) ...[
+                    const SizedBox(height: 8),
+                    FloatingActionButton.small(
+                      heroTag: 'navi_btn',
+                      backgroundColor: const Color(0xFF00C853),
+                      onPressed: _openGoogleMapsNavigation,
+                      child: const Icon(Icons.navigation, color: Colors.white),
+                    ),
+                    const SizedBox(height: 4),
+                    const Text('ナビ', style: TextStyle(color: Colors.white70, fontSize: 10)),
+                  ],
                 ],
               ),
               const SizedBox(width: 12),
