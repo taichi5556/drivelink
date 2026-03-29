@@ -367,51 +367,50 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
     debugPrint('_fetchRoute開始: dest=$dest');
     const apiKey = 'AIzaSyChuUZypiVhojgCO6ZgZML-ZW3eYLtti5c';
     try {
-      final polylinePoints = PolylinePoints(apiKey: apiKey);
-      final result = await polylinePoints.getRouteBetweenCoordinates(
-        request: PolylineRequest(
-          origin: PointLatLng(_myPosition!.latitude, _myPosition!.longitude),
-          destination: PointLatLng(dest.latitude, dest.longitude),
-          mode: TravelMode.driving,
-        ),
-      );
-      debugPrint('ルート結果: ${result.status} points=${result.points.length}');
-      if (result.points.isNotEmpty && mounted) {
-        final coords = result.points
-            .map((p) => LatLng(p.latitude, p.longitude))
-            .toList();
-        setState(() {
-          _polylines = {
-            Polyline(
-              polylineId: const PolylineId('route'),
-              points: coords,
-              color: const Color(0xFF1565C0),
-              width: 5,
-            ),
-          };
-        });
+      final origin = '${_myPosition!.latitude},${_myPosition!.longitude}';
+      final destination = '${dest.latitude},${dest.longitude}';
+      final url = 'https://maps.googleapis.com/maps/api/directions/json'
+          '?origin=$origin&destination=$destination'
+          '&mode=driving&language=ja&key=$apiKey';
+      final client = HttpClient();
+      final request = await client.getUrl(Uri.parse(url));
+      final response = await request.close();
+      final body = await response.transform(const Utf8Decoder()).join();
+      final data = jsonDecode(body);
+      debugPrint('Directions API status: ${data["status"]}');
+      if (data['status'] == 'OK') {
+        final steps = data['routes'][0]['legs'][0]['steps'] as List;
+        final polyPts = PolylinePoints(apiKey: apiKey);
+        final allCoords = <LatLng>[];
+        for (final step in steps) {
+          final encoded = step['polyline']['points'] as String;
+          final points = PolylinePoints.decodePolyline(encoded);
+          allCoords.addAll(points.map((p) => LatLng(p.latitude, p.longitude)));
+        }
+        debugPrint('詳細ルートpoints=${allCoords.length}');
+        if (allCoords.isNotEmpty && mounted) {
+          setState(() {
+            _polylines = {
+              Polyline(
+                polylineId: const PolylineId('route'),
+                points: allCoords,
+                color: const Color(0xFF1565C0),
+                width: 5,
+              ),
+            };
+          });
+          _animateCamera(
+            CameraUpdate.newLatLngZoom(_myPosition!, 14),
+            programmatic: true,
+          );
+        }
       } else {
-        debugPrint('ルートなし: ${result.errorMessage}');
+        debugPrint('ルートなし: ${data["status"]}');
       }
     } catch (e) {
       debugPrint('ルート取得エラー: $e');
     }
   }
-
-    Future<void> _openGoogleMapsNavigation() async {
-    final dest = _activeDestination;
-    if (dest == null) return;
-    final name = Uri.encodeComponent(_activeDestName);
-    final url = 'https://www.google.com/maps/dir/?api=1'
-        '&destination=\${dest.latitude},\${dest.longitude}'
-        '&destination_place_name=\$name'
-        '&travelmode=driving';
-    final uri = Uri.parse(url);
-    if (await canLaunchUrl(uri)) {
-      await launchUrl(uri, mode: LaunchMode.externalApplication);
-    }
-  }
-
   Future<void> _setPersonalDestination() async {
     final TextEditingController searchCtrl = TextEditingController();
     List<Map<String, dynamic>> searchResults = [];
@@ -504,7 +503,6 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
                             _updateDestinationMarker();
                             Navigator.pop(ctx);
                             await _shareGroupDestination();
-                            _animateCamera(CameraUpdate.newLatLngZoom(LatLng(r['lat'], r['lng']), 14), programmatic: true);
                           },
                         );
                       },
