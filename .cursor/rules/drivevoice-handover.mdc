@@ -1,0 +1,65 @@
+# DriveVoice 引き継ぎ書（2026年3月28日）
+
+## アプリ情報
+- アプリ名: DriveVoice
+- バンドルID: com.itoutaichi.drivelink
+- GitHub: taichi5556/drivelink
+- Flutterプロジェクト: ~/projects/drivelink
+- 現在バージョン: 1.0.2+8
+
+## iOS（App Store）状況
+- バージョン1.0.2(Build 8)を審査提出済み
+- 提出日: 2026年3月28日 17:22
+- ステータス: 審査待ち（24〜48時間）
+
+## Android（Google Play）状況
+- クローズドテスト(Alpha)にBuild 8(1.0.2)を提出済み
+- ステータス: クイックチェック中→審査待ち
+- 製品版リリースにはクローズドテスト完了が必要
+
+## 地図・GPS（main_screen.dart 要約）
+- 20秒で自分位置へ自動復帰するタイマーは**使用しない**（削除済み）。
+- `_locationTimer`: `Timer.periodic(Duration(seconds: 5))` → `_updateLocation()`。`!_isFollowingMember` のときだけ `_animateCamera` で自分位置へ追従。
+- メンバータップ: `_isFollowingMember = true` → 相手座標へ `animateCamera`。
+- 地図スワイプ: `onCameraMoveStarted` で `_isFollowingMember = true`（追従停止、タイマーなし）。
+- 右下 FAB: `_isFollowingMember = false` + 自分位置へ `_animateCamera`（追従再開）。
+
+## Firebase セキュリティ
+- Realtime Database: drivelink-a7ffb-default-rtdb
+- ルール: 認証済みユーザーのみ読み書き可能
+- 警告メールは誤検知（現行ルールは適切）
+
+## デバイス情報
+- iPhone ID: 00008150-001865A41E38401C
+- Mac: MacBook Air (itoutaichi)
+- 開発チーム: 6DDL2RPVJ3
+
+## 次にやること
+1. App Store審査結果を待つ（24〜48時間）
+2. Android クローズドテスト審査結果を待つ
+3. 友達のGmailをクローズドテスターに追加
+4. Cursorを再起動して日本語化を確認
+5. Cmd+Shift+P → Shell Command: Install cursor command
+
+## よく使うコマンド
+# Cursorでプロジェクトを開く（ターミナル）
+cd ~/projects/drivelink
+cursor .
+# → Cursorがdrivelinkを開く
+
+# バージョンアップ
+sed -i '' 's/^version: 1.0.2+8/version: 1.0.3+9/' ~/projects/drivelink/pubspec.yaml
+
+# iOSビルド
+cd ~/projects/drivelink && flutter build ipa --release
+
+# Androidビルド
+cd ~/projects/drivelink && flutter build appbundle --release
+
+# 実機テスト
+flutter run -d 00008150-001865A41E38401C --release
+
+# キャッシュ削除
+rm -rf ~/Library/Developer/Xcode/DerivedData/*
+flutter clean
+rm -rf ~/.gradle/caches/

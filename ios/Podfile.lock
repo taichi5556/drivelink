@@ -149,7 +149,7 @@ PODS:
   - GoogleUtilities/UserDefaults (8.1.0):
     - GoogleUtilities/Logger
     - GoogleUtilities/Privacy
-  - GTMSessionFetcher/Core (5.1.0)
+  - GTMSessionFetcher/Core (5.2.0)
   - iris_method_channel (0.0.1):
     - Flutter
   - leveldb-library (1.22.6)
@@ -273,7 +273,7 @@ SPEC CHECKSUMS:
   google_maps_flutter_ios: 0cf046caf50b00d95071f79e8031fcd5ef902beb
   GoogleMaps: 0608099d4870cac8754bdba9b6953db543432438
   GoogleUtilities: 00c88b9a86066ef77f0da2fab05f65d7768ed8e1
-  GTMSessionFetcher: b8ab00db932816e14b0a0664a08cb73dda6d164b
+  GTMSessionFetcher: 904bdd2a82c635bcd6f44edf94cc8775c5d1d6e6
   iris_method_channel: 7d661cf3259b3009ae423508470dbeb9374446ee
   leveldb-library: cc8b8f8e013647a295ad3f8cd2ddf49a6f19be19
   package_info_plus: af8e2ca6888548050f16fa2f1938db7b5a5df499

@@ -31,6 +31,9 @@ class MainScreen extends StatefulWidget {
 
 class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
   GoogleMapController? _mapController;
+  bool _isFollowingMember = false;
+  /// ユーザー操作ではない animateCamera 中は onCameraMoveStarted で追従モードにしない
+  bool _programmaticCameraMove = false;
   Set<Marker> _markers = {};
   LatLng _myPosition = const LatLng(35.6812, 139.7671);
   bool _isRecording = false;
@@ -39,6 +42,7 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
   String _remainingTime = '';
   Timer? _countdownTimer;
   Timer? _locationTimer;
+  bool _updateLocationInProgress = false;
   String _fromNickname = '';
   bool _showReceiving = false;
   late AnimationController _pulseController;
@@ -248,6 +252,8 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
   }
 
   Future<void> _updateLocation() async {
+    if (_updateLocationInProgress) return;
+    _updateLocationInProgress = true;
     try {
       final permission = await Geolocator.checkPermission();
       if (permission == LocationPermission.denied ||
@@ -260,18 +266,25 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
         }
       }
       final pos = await Geolocator.getCurrentPosition();
-      if (mounted) {
-        setState(() => _myPosition = LatLng(pos.latitude, pos.longitude));
-        _mapController?.animateCamera(CameraUpdate.newLatLng(_myPosition));
-      }
+      if (!mounted) return;
+      setState(() => _myPosition = LatLng(pos.latitude, pos.longitude));
       await _db.child('rooms/${widget.roomCode}/members/${widget.userId}').update({
         'nickname': widget.nickname,
         'lat': pos.latitude,
         'lng': pos.longitude,
         'last_seen': DateTime.now().millisecondsSinceEpoch,
       });
+      if (!mounted) return;
+      if (!_isFollowingMember && !_programmaticCameraMove) {
+        _animateCamera(
+          CameraUpdate.newLatLng(_myPosition),
+          programmatic: true,
+        );
+      }
     } catch (e) {
       debugPrint('位置情報エラー: $e');
+    } finally {
+      _updateLocationInProgress = false;
     }
   }
 
@@ -329,6 +342,14 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
     await _db.child('rooms/${widget.roomCode}/recording_user').remove();
     if (mounted) setState(() => _isRecording = false);
     debugPrint('Agora録音停止');
+  }
+
+  void _animateCamera(CameraUpdate update, {required bool programmatic}) {
+    if (_mapController == null) return;
+    if (programmatic) {
+      _programmaticCameraMove = true;
+    }
+    _mapController!.animateCamera(update);
   }
 
   double _calcDistance(double lat, double lng) {
@@ -409,7 +430,17 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
           initialCameraPosition: CameraPosition(target: _myPosition, zoom: 15),
           markers: _markers,
           onMapCreated: (c) => _mapController = c,
-          myLocationEnabled: true,
+          onCameraMoveStarted: () {
+            if (_programmaticCameraMove) {
+              _programmaticCameraMove = false;
+              return;
+            }
+            setState(() => _isFollowingMember = true);
+          },
+          onCameraIdle: () {
+            _programmaticCameraMove = false;
+          },
+          myLocationEnabled: false,
           myLocationButtonEnabled: false,
           zoomControlsEnabled: false,
         ),
@@ -418,7 +449,13 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
               bottom: 8,
               child: FloatingActionButton.small(
                 backgroundColor: Colors.white,
-                onPressed: () => _mapController?.animateCamera(CameraUpdate.newLatLng(_myPosition)),
+                onPressed: () {
+                  setState(() => _isFollowingMember = true);
+                  _animateCamera(
+                    CameraUpdate.newLatLng(_myPosition),
+                    programmatic: true,
+                  );
+                },
                 child: const Icon(Icons.my_location, color: Colors.grey),
               ),
             ),
@@ -553,6 +590,7 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
             padding: const EdgeInsets.symmetric(horizontal: 8),
             child: GestureDetector(
               onTap: () {
+                setState(() => _isFollowingMember = true);
                 _mapController?.animateCamera(
                   CameraUpdate.newLatLng(LatLng(lat, lng)),
                 );

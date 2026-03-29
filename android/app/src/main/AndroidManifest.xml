@@ -9,8 +9,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" tools:node="remove"/>
 
     <application
+        android:name="androidx.multidex.MultiDexApplication"
         android:label="DriveVoice"
-        android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
 
         <!-- Google Maps APIキー -->
