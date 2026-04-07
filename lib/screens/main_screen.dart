@@ -114,7 +114,7 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
       // iOSのAVAudioSessionをAgoraに触らせない
       await _agoraEngine!.setParameters('{"che.audio.ios.audioSessionRestriction": 128}');
       await _agoraEngine!.setParameters('{"che.audio.enable.bt.hfp": false}');
-      await _agoraEngine!.enableAudio();
+      // await _agoraEngine!.enableAudio(); // AVAudioSession上書き防止のため無効化
       await _agoraEngine!.muteLocalAudioStream(true); // マイクはミュート状態で待機
       await _agoraEngine!.setAudioProfile(
         profile: AudioProfileType.audioProfileMusicHighQuality,
@@ -140,7 +140,7 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
         options: const ChannelMediaOptions(
           channelProfile: ChannelProfileType.channelProfileCommunication,
           clientRoleType: ClientRoleType.clientRoleBroadcaster,
-          publishMicrophoneTrack: false,
+          publishMicrophoneTrack: true,
           autoSubscribeAudio: true,
         ),
       );
@@ -661,19 +661,14 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
       debugPrint('Agora未接続のため録音不可');
       return;
     }
-    // マイクのミュート解除のみ（enableAudioは呼ばない）
-    _audioChannel?.invokeMethod('requestAudioFocus'); // ノンブロッキング
-    await _agoraEngine?.setDefaultAudioRouteToSpeakerphone(true);
-    // Agoraのマイク送信を開始
-    try {
-      await _agoraEngine?.updateChannelMediaOptions(const ChannelMediaOptions(
-        publishMicrophoneTrack: true,
-        clientRoleType: ClientRoleType.clientRoleBroadcaster,
-      ));
-    } catch (e) {
-      debugPrint('startRecording Agora error: $e');
-      return;
+    // 送話直前に restriction を再設定（joinChannel でリセットされる場合に備えて）
+    if (defaultTargetPlatform == TargetPlatform.iOS) {
+      await _agoraEngine?.setParameters('{"che.audio.ios.audioSessionRestriction": 128}');
     }
+    // AppDelegate 経由で AVAudioSession を duckOthers+mixWithOthers に設定
+    await _audioChannel?.invokeMethod('requestAudioFocus');
+    await _agoraEngine?.setDefaultAudioRouteToSpeakerphone(true);
+    // Agoraのマイク送信を開始（joinChannel時にpublishMicrophoneTrack: true設定済み）
     await _db.child('rooms/${widget.roomCode}/recording_user').set(widget.userId);
     try {
       await _agoraEngine?.muteLocalAudioStream(false);
@@ -691,17 +686,7 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
   }
 
   Future<void> _stopRecording() async {
-    // Agoraのマイク送信を停止
-    if (_agoraJoined) {
-      try {
-        await _agoraEngine?.updateChannelMediaOptions(const ChannelMediaOptions(
-          publishMicrophoneTrack: false,
-          clientRoleType: ClientRoleType.clientRoleBroadcaster,
-        ));
-      } catch (e) {
-        debugPrint('stopRecording Agora error: $e');
-      }
-    }
+    // Agoraのマイク送信を停止（muteLocalAudioStreamのみ使用）
     _recordTimer?.cancel();
     try {
       await _agoraEngine?.muteLocalAudioStream(true);
