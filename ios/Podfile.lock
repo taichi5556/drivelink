@@ -67,11 +67,11 @@ PODS:
   - firebase_core (4.6.0):
     - Firebase/CoreOnly (= 12.9.0)
     - Flutter
-  - firebase_database (12.1.4):
+  - firebase_database (12.2.0):
     - Firebase/Database (= 12.9.0)
     - firebase_core
     - Flutter
-  - firebase_storage (13.1.0):
+  - firebase_storage (13.2.0):
     - Firebase/Storage (= 12.9.0)
     - firebase_core
     - Flutter
@@ -259,8 +259,8 @@ SPEC CHECKSUMS:
   Firebase: 065f2bb395062046623036d8e6dc857bc2521d56
   firebase_auth: 323c64eedef33fc3fdf438d16c29d2624b2ce4f4
   firebase_core: 8e6f58412ca227827c366b92e7cee047a2148c60
-  firebase_database: 4b0181cd5e1477c8c321e1cc6bbf07a55bcc05fa
-  firebase_storage: 85d65a656f88f9bdf1fb0d7f537ae7ebf4266709
+  firebase_database: 907907fbf646c90fe16f189e1f29f3e7a6728332
+  firebase_storage: 8d16922c017c49812f7bbe64a86f756f99a44c74
   FirebaseAppCheckInterop: 4bade10286cc977e516f75d2d8312cbdfa534789
   FirebaseAuth: 3a39f6436c21ebfd7919b698228b4f89ff94c23b
   FirebaseAuthInterop: f8f6ff72dc24621906497fbe5cf3c42ee815e59c
@@ -275,7 +275,7 @@ SPEC CHECKSUMS:
   flutter_sound_core: 7f2626d249d3a57bfa6da892ef7e22d234482c1a
   geolocator_apple: ab36aa0e8b7d7a2d7639b3b4e48308394e8cef5e
   Google-Maps-iOS-Utils: 0a484b05ed21d88c9f9ebbacb007956edd508a96
-  google_maps_flutter_ios: 0cf046caf50b00d95071f79e8031fcd5ef902beb
+  google_maps_flutter_ios: 17552876e72723da1d41accc22f03b5f7afbde69
   GoogleMaps: 0608099d4870cac8754bdba9b6953db543432438
   GoogleUtilities: 00c88b9a86066ef77f0da2fab05f65d7768ed8e1
   GTMSessionFetcher: 904bdd2a82c635bcd6f44edf94cc8775c5d1d6e6

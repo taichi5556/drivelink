@@ -7,6 +7,7 @@ list(APPEND FLUTTER_PLUGIN_LIST
   app_links
   firebase_auth
   firebase_core
+  firebase_database
   firebase_storage
   flutter_sound
   geolocator_windows
