@@ -662,7 +662,7 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
       return;
     }
     // マイクのミュート解除のみ（enableAudioは呼ばない）
-    await _audioChannel?.invokeMethod('requestAudioFocus');
+    _audioChannel?.invokeMethod('requestAudioFocus'); // ノンブロッキング
     await _agoraEngine?.setDefaultAudioRouteToSpeakerphone(true);
     // Agoraのマイク送信を開始
     try {
