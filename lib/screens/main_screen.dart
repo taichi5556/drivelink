@@ -111,10 +111,12 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
       _agoraEngine = createAgoraRtcEngine();
       await _agoraEngine!.initialize(RtcEngineContext(appId: agoraAppId));
       await _agoraEngine!.setClientRole(role: ClientRoleType.clientRoleAudience);
-      // iOSのAVAudioSessionをAgoraに触らせない
-      await _agoraEngine!.setParameters('{"che.audio.ios.audioSessionRestriction": 128}');
-      await _agoraEngine!.setParameters('{"che.audio.enable.bt.hfp": false}');
-      // await _agoraEngine!.enableAudio(); // AVAudioSession上書き防止のため無効化
+      await _agoraEngine!.enableAudio(); // 音声エンジン有効化
+      // iOSのAVAudioSessionをAgoraに触らせない（iOSのみ）
+      if (defaultTargetPlatform == TargetPlatform.iOS) {
+        await _agoraEngine!.setParameters('{"che.audio.ios.audioSessionRestriction": 128}');
+        await _agoraEngine!.setParameters('{"che.audio.enable.bt.hfp": false}');
+      }
       await _agoraEngine!.muteLocalAudioStream(true); // マイクはミュート状態で待機
       await _agoraEngine!.setAudioProfile(
         profile: AudioProfileType.audioProfileMusicHighQuality,
@@ -140,7 +142,7 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
         options: const ChannelMediaOptions(
           channelProfile: ChannelProfileType.channelProfileCommunication,
           clientRoleType: ClientRoleType.clientRoleBroadcaster,
-          publishMicrophoneTrack: true,
+          publishMicrophoneTrack: false,
           autoSubscribeAudio: true,
         ),
       );
@@ -236,7 +238,12 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
       if (!wasReceiving && isNowReceiving) {
         await _agoraEngine?.setDefaultAudioRouteToSpeakerphone(true);
       } else if (wasReceiving && !isNowReceiving) {
-        // 受信停止（disableAudioは呼ばない）
+        // 受信終了 → 送信準備（次のPTTを即座に送信できるよう準備）
+        await _agoraEngine?.updateChannelMediaOptions(const ChannelMediaOptions(
+          publishMicrophoneTrack: false,
+          clientRoleType: ClientRoleType.clientRoleBroadcaster,
+        ));
+        await _agoraEngine?.muteLocalAudioStream(true);
       }
       if (mounted) {
         setState(() {
@@ -661,18 +668,29 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
       debugPrint('Agora未接続のため録音不可');
       return;
     }
-    // 送話直前に restriction を再設定（joinChannel でリセットされる場合に備えて）
+    // iOS のみ: AVAudioSession 設定
     if (defaultTargetPlatform == TargetPlatform.iOS) {
       await _agoraEngine?.setParameters('{"che.audio.ios.audioSessionRestriction": 128}');
+      await _audioChannel?.invokeMethod('requestAudioFocus');
+      await _agoraEngine?.setDefaultAudioRouteToSpeakerphone(true);
     }
-    // AppDelegate 経由で AVAudioSession を duckOthers+mixWithOthers に設定
-    await _audioChannel?.invokeMethod('requestAudioFocus');
-    await _agoraEngine?.setDefaultAudioRouteToSpeakerphone(true);
-    // Agoraのマイク送信を開始（joinChannel時にpublishMicrophoneTrack: true設定済み）
+    // マイクトラックを有効化
+    try {
+      await _agoraEngine?.updateChannelMediaOptions(const ChannelMediaOptions(
+        publishMicrophoneTrack: true,
+        clientRoleType: ClientRoleType.clientRoleBroadcaster,
+      ));
+    } catch (e) {
+      debugPrint('startRecording Agora error: $e');
+      return;
+    }
+    // 受信直後の場合に備えて少し待機
+    if (_isOtherRecording == false) {
+      await Future.delayed(const Duration(milliseconds: 300));
+    }
     await _db.child('rooms/${widget.roomCode}/recording_user').set(widget.userId);
     try {
       await _agoraEngine?.muteLocalAudioStream(false);
-      await _agoraEngine?.setClientRole(role: ClientRoleType.clientRoleBroadcaster);
       if (mounted) setState(() { _isRecording = true; _recordSeconds = 0; });
       _recordTimer = Timer.periodic(const Duration(seconds: 1), (_) {
         setState(() => _recordSeconds++);
@@ -686,7 +704,17 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
   }
 
   Future<void> _stopRecording() async {
-    // Agoraのマイク送信を停止（muteLocalAudioStreamのみ使用）
+    // マイクトラックを無効化
+    if (_agoraJoined) {
+      try {
+        await _agoraEngine?.updateChannelMediaOptions(const ChannelMediaOptions(
+          publishMicrophoneTrack: false,
+          clientRoleType: ClientRoleType.clientRoleBroadcaster,
+        ));
+      } catch (e) {
+        debugPrint('stopRecording Agora error: $e');
+      }
+    }
     _recordTimer?.cancel();
     try {
       await _agoraEngine?.muteLocalAudioStream(true);
@@ -694,10 +722,10 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
       debugPrint('録音停止エラー: $e');
     }
     await _db.child('rooms/${widget.roomCode}/recording_user').remove();
-    // マイクをミュートに戻す（disableAudioは呼ばない）
-    await _agoraEngine?.muteLocalAudioStream(true);
     if (mounted) setState(() { _isRecording = false; _recordSeconds = 0; });
-    await _audioChannel?.invokeMethod('abandonAudioFocus');
+    if (defaultTargetPlatform == TargetPlatform.iOS) {
+      await _audioChannel?.invokeMethod('abandonAudioFocus');
+    }
     debugPrint('Agora録音停止');
   }
 
@@ -916,6 +944,9 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
               Expanded(
                 child:
           GestureDetector(
+            onTapDown: (_) async {
+              await _agoraEngine?.muteLocalAudioStream(false);
+            },
             onLongPressStart: _isOtherRecording ? null : (_) => _startRecording(),
             onLongPressEnd: _isOtherRecording ? null : (_) => _stopRecording(),
             child: AnimatedBuilder(

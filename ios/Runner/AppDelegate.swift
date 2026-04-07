@@ -10,6 +10,16 @@ import AVFoundation
 
   override func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
     GMSServices.provideAPIKey("AIzaSyDXDhBtGYtEET-8xpnUHJV-KJZRkjnVH-c")
+    do {
+      try AVAudioSession.sharedInstance().setCategory(
+        .playAndRecord,
+        mode: .default,
+        options: [.defaultToSpeaker, .allowBluetooth]
+      )
+      try AVAudioSession.sharedInstance().setActive(true)
+    } catch {
+      print("AVAudioSession error: \(error)")
+    }
     GeneratedPluginRegistrant.register(with: self)
     let result = super.application(application, didFinishLaunchingWithOptions: launchOptions)
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { self.setupChannelIfNeeded() }
@@ -36,21 +46,22 @@ import AVFoundation
         result(nil)
 
       case "requestReceiveFocus":
-        // 受信: YouTube停止 → 無音再生でセッション維持 → 受信終了後に再開
+        // 受信: Agora音声を聞こえるようにする
         let session = AVAudioSession.sharedInstance()
-        try? session.setCategory(.playback, mode: .default, options: [])
-        try? session.setActive(true)
-        self?.startSilentAudio()
-        result(nil)
-
-      case "abandonAudioFocus":
-        // 送受信終了: 無音停止 → YouTube再開通知 → .playback に戻す
-        self?.stopSilentAudio()
-        let session = AVAudioSession.sharedInstance()
-        try? session.setActive(false, options: .notifyOthersOnDeactivation)
         try? session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
         try? session.setActive(true)
         result(nil)
+
+      case "abandonAudioFocus":
+        // PTT終了: .playAndRecord + .allowBluetooth に戻す（App Store版と同じ）
+        result(nil)
+        self?.stopSilentAudio()
+        DispatchQueue.global(qos: .userInitiated).async {
+          let session = AVAudioSession.sharedInstance()
+          try? session.setCategory(.playAndRecord, mode: .default,
+            options: [.defaultToSpeaker, .allowBluetooth, .mixWithOthers])
+          try? session.setActive(true)
+        }
 
       default:
         result(FlutterMethodNotImplemented)
