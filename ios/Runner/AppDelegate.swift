@@ -14,7 +14,7 @@ import AVFoundation
     GMSServices.provideAPIKey("AIzaSyDXDhBtGYtEET-8xpnUHJV-KJZRkjnVH-c")
     GeneratedPluginRegistrant.register(with: self)
     let result = super.application(application, didFinishLaunchingWithOptions: launchOptions)
-    // setupAudioSessionOnce() 削除 → 起動時のYouTube音量低下を防ぐ
+    setupAudioSessionOnce()
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
       self.setupChannelIfNeeded()
     }
@@ -24,6 +24,22 @@ import AVFoundation
   override func applicationDidBecomeActive(_ application: UIApplication) {
     super.applicationDidBecomeActive(application)
     setupChannelIfNeeded()
+  }
+
+  private func setupAudioSessionOnce() {
+    let session = AVAudioSession.sharedInstance()
+    do {
+      // .playback = 再生専用宣言 → HFP切り替えのトリガーにならない
+      try session.setCategory(
+        .playback,
+        mode: .default,
+        options: [.mixWithOthers]
+      )
+      try session.setActive(true)
+      print("AVAudioSession .playback設定完了")
+    } catch {
+      print("AVAudioSession error: \(error)")
+    }
   }
 
   private func setupChannelIfNeeded() {
