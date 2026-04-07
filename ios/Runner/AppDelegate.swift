@@ -6,18 +6,13 @@ import AVFoundation
 @main
 @objc class AppDelegate: FlutterAppDelegate {
   private var audioChannel: FlutterMethodChannel?
+  private var silentPlayer: AVAudioPlayer?
 
-  override func application(
-    _ application: UIApplication,
-    didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
-  ) -> Bool {
+  override func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
     GMSServices.provideAPIKey("AIzaSyDXDhBtGYtEET-8xpnUHJV-KJZRkjnVH-c")
     GeneratedPluginRegistrant.register(with: self)
     let result = super.application(application, didFinishLaunchingWithOptions: launchOptions)
-    setupAudioSessionOnce()
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-      self.setupChannelIfNeeded()
-    }
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { self.setupChannelIfNeeded() }
     return result
   }
 
@@ -26,34 +21,72 @@ import AVFoundation
     setupChannelIfNeeded()
   }
 
-  private func setupAudioSessionOnce() {
-    let session = AVAudioSession.sharedInstance()
-    do {
-      // .playback = 再生専用宣言 → HFP切り替えのトリガーにならない
-      try session.setCategory(
-        .playback,
-        mode: .default,
-        options: [.mixWithOthers]
-      )
-      try session.setActive(true)
-      print("AVAudioSession .playback設定完了")
-    } catch {
-      print("AVAudioSession error: \(error)")
-    }
-  }
-
   private func setupChannelIfNeeded() {
     guard audioChannel == nil, let vc = getFlutterViewController() else { return }
     audioChannel = FlutterMethodChannel(name: "drivelink/audio", binaryMessenger: vc.binaryMessenger)
-    audioChannel?.setMethodCallHandler { (call, result) in
+    audioChannel?.setMethodCallHandler { [weak self] (call, result) in
       switch call.method {
-      case "requestAudioFocus", "abandonAudioFocus":
+
+      case "requestAudioFocus":
+        // PTT送信: .playAndRecord + .duckOthers（マイク使用）
+        let session = AVAudioSession.sharedInstance()
+        try? session.setCategory(.playAndRecord, mode: .default,
+          options: [.allowBluetoothA2DP, .mixWithOthers, .duckOthers])
+        try? session.setActive(true)
         result(nil)
+
+      case "requestReceiveFocus":
+        // 受信: YouTube停止 → 無音再生でセッション維持 → 受信終了後に再開
+        let session = AVAudioSession.sharedInstance()
+        try? session.setCategory(.playback, mode: .default, options: [])
+        try? session.setActive(true)
+        self?.startSilentAudio()
+        result(nil)
+
+      case "abandonAudioFocus":
+        // 送受信終了: 無音停止 → YouTube再開通知 → .playback に戻す
+        self?.stopSilentAudio()
+        let session = AVAudioSession.sharedInstance()
+        try? session.setActive(false, options: .notifyOthersOnDeactivation)
+        try? session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
+        try? session.setActive(true)
+        result(nil)
+
       default:
         result(FlutterMethodNotImplemented)
       }
     }
     print("drivelink/audio チャンネル登録完了")
+  }
+
+  // 無音WAVをメモリ上で生成してループ再生
+  private func startSilentAudio() {
+    guard silentPlayer == nil else { return }
+    // 44バイトのWAVヘッダー + 4410サンプル(0.1秒)の無音データ
+    let sampleRate: UInt32 = 44100
+    let numSamples: UInt32 = 4410
+    let dataSize: UInt32 = numSamples * 2
+    var wav = Data()
+    func appendUInt32(_ v: UInt32) { var x = v.littleEndian; wav.append(contentsOf: withUnsafeBytes(of: &x) { Array($0) }) }
+    func appendUInt16(_ v: UInt16) { var x = v.littleEndian; wav.append(contentsOf: withUnsafeBytes(of: &x) { Array($0) }) }
+    wav.append(contentsOf: "RIFF".utf8); appendUInt32(36 + dataSize)
+    wav.append(contentsOf: "WAVE".utf8)
+    wav.append(contentsOf: "fmt ".utf8); appendUInt32(16)
+    appendUInt16(1); appendUInt16(1); appendUInt32(sampleRate)
+    appendUInt32(sampleRate * 2); appendUInt16(2); appendUInt16(16)
+    wav.append(contentsOf: "data".utf8); appendUInt32(dataSize)
+    wav.append(Data(count: Int(dataSize)))
+    silentPlayer = try? AVAudioPlayer(data: wav, fileTypeHint: AVFileType.wav.rawValue)
+    silentPlayer?.numberOfLoops = -1
+    silentPlayer?.volume = 0.0
+    silentPlayer?.play()
+    print("無音ループ開始")
+  }
+
+  private func stopSilentAudio() {
+    silentPlayer?.stop()
+    silentPlayer = nil
+    print("無音ループ停止")
   }
 
   private func getFlutterViewController() -> FlutterViewController? {
@@ -68,10 +101,7 @@ import AVFoundation
     return nil
   }
 
-  override func application(
-    _ app: UIApplication, open url: URL,
-    options: [UIApplication.OpenURLOptionsKey: Any] = [:]
-  ) -> Bool {
+  override func application(_ app: UIApplication, open url: URL, options: [UIApplication.OpenURLOptionsKey: Any] = [:]) -> Bool {
     return super.application(app, open: url, options: options)
   }
 }

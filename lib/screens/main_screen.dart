@@ -118,7 +118,7 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
       await _agoraEngine!.muteLocalAudioStream(true); // マイクはミュート状態で待機
       await _agoraEngine!.setAudioProfile(
         profile: AudioProfileType.audioProfileMusicHighQuality,
-        scenario: AudioScenarioType.audioScenarioGameStreaming,
+        scenario: AudioScenarioType.audioScenarioChatroom,
       );
       await _agoraEngine!.setDefaultAudioRouteToSpeakerphone(true);
       _agoraEngine!.registerEventHandler(RtcEngineEventHandler(
@@ -951,7 +951,7 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
                     ),
                     const SizedBox(width: 12),
                     Text(
-                      _isOtherRecording ? '録音中(他ユーザー)' : _isRecording ? '送信中...' : '長押しで送信',
+                      _isOtherRecording ? '録音中(他ユーザー)' : _isRecording ? '送信中...' : '押してる間、全員へ送信',
                       style: const TextStyle(
                         color: Colors.white,
                         fontSize: 18,
