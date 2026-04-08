@@ -38,10 +38,10 @@ import AVFoundation
       switch call.method {
 
       case "requestAudioFocus":
-        // PTT送信: .playAndRecord + .duckOthers（マイク使用）
+        // PTT送信: .playAndRecord（マイク使用、YouTubeは継続）
         let session = AVAudioSession.sharedInstance()
         try? session.setCategory(.playAndRecord, mode: .default,
-          options: [.allowBluetoothA2DP, .mixWithOthers, .duckOthers])
+          options: [.allowBluetoothA2DP, .mixWithOthers])
         try? session.setActive(true)
         result(nil)
 

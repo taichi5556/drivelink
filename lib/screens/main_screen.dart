@@ -523,7 +523,6 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
                             });
                             _updateDestinationMarker();
                             Navigator.pop(ctx);
-                            await _shareGroupDestination();
                           },
                         );
                       },
@@ -668,12 +667,7 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
       debugPrint('Agora未接続のため録音不可');
       return;
     }
-    // iOS のみ: AVAudioSession 設定
-    if (defaultTargetPlatform == TargetPlatform.iOS) {
-      await _agoraEngine?.setParameters('{"che.audio.ios.audioSessionRestriction": 128}');
-      await _audioChannel?.invokeMethod('requestAudioFocus');
-      await _agoraEngine?.setDefaultAudioRouteToSpeakerphone(true);
-    }
+
     // マイクトラックを有効化
     try {
       await _agoraEngine?.updateChannelMediaOptions(const ChannelMediaOptions(
@@ -723,9 +717,7 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
     }
     await _db.child('rooms/${widget.roomCode}/recording_user').remove();
     if (mounted) setState(() { _isRecording = false; _recordSeconds = 0; });
-    if (defaultTargetPlatform == TargetPlatform.iOS) {
-      await _audioChannel?.invokeMethod('abandonAudioFocus');
-    }
+
     debugPrint('Agora録音停止');
   }
 
@@ -832,6 +824,37 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
           myLocationButtonEnabled: false,
           zoomControlsEnabled: false,
         ),
+            Positioned(
+              right: 8,
+              bottom: 70,
+              child: FloatingActionButton(
+                heroTag: 'share_route_btn',
+                backgroundColor: _groupDestination != null
+                    ? const Color(0xFF00D4FF)
+                    : Colors.grey[300],
+                onPressed: _groupDestination != null
+                    ? _shareGroupDestination
+                    : null,
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(
+                      Icons.share,
+                      color: _groupDestination != null ? Colors.white : Colors.grey,
+                      size: 20,
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      'ルート共有',
+                      style: TextStyle(
+                        color: _groupDestination != null ? Colors.white : Colors.grey,
+                        fontSize: 9,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
             Positioned(
               right: 8,
               bottom: 8,
