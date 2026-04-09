@@ -11,6 +11,7 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:firebase_database/firebase_database.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:vibration/vibration.dart';
 import 'login_screen.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:app_links/app_links.dart';
@@ -666,6 +667,11 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
     if (!_agoraJoined) {
       debugPrint('Agora未接続のため録音不可');
       return;
+    }
+
+    // iOS/Android両対応の振動フィードバック（録音開始を通知）
+    if (await Vibration.hasVibrator() ?? false) {
+      Vibration.vibrate(duration: 100); // 100ms の短い振動
     }
 
     // マイクトラックを有効化

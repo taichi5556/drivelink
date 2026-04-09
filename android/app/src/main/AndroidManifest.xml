@@ -8,7 +8,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" tools:node="remove"/>
 
-    <application
+        <uses-permission android:name="android.permission.VIBRATE"/>
+<application
         android:name="androidx.multidex.MultiDexApplication"
         android:label="DriveVoice"
         android:icon="@mipmap/ic_launcher">
