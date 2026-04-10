@@ -12,9 +12,9 @@ import AVFoundation
     GMSServices.provideAPIKey("AIzaSyDXDhBtGYtEET-8xpnUHJV-KJZRkjnVH-c")
     do {
       try AVAudioSession.sharedInstance().setCategory(
-        .playAndRecord,
+        .playback,
         mode: .default,
-        options: [.defaultToSpeaker, .allowBluetooth]
+        options: [.mixWithOthers, .allowBluetoothA2DP]
       )
       try AVAudioSession.sharedInstance().setActive(true)
     } catch {
@@ -36,6 +36,14 @@ import AVFoundation
     audioChannel = FlutterMethodChannel(name: "drivelink/audio", binaryMessenger: vc.binaryMessenger)
     audioChannel?.setMethodCallHandler { [weak self] (call, result) in
       switch call.method {
+
+      case "restoreSession":
+        // ドライブモード復帰: A2DP高音質、音楽アプリと共存
+        let session = AVAudioSession.sharedInstance()
+        try? session.setCategory(.playback, mode: .default,
+          options: [.mixWithOthers, .allowBluetoothA2DP])
+        try? session.setActive(true)
+        result(nil)
 
       case "requestAudioFocus":
         // PTT送信: .playAndRecord（マイク使用、YouTubeは継続）

@@ -46,6 +46,7 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
   LatLng _myPosition = const LatLng(35.6812, 139.7671);
   bool _isRecording = false;
   bool _isOtherRecording = false;
+  String _voiceMode = 'drive'; // 'drive': ドライブモード / 'talk': 通話モード
   Timer? _expiryTimer;
   String _remainingTime = '';
   Timer? _countdownTimer;
@@ -111,13 +112,13 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
     try {
       _agoraEngine = createAgoraRtcEngine();
       await _agoraEngine!.initialize(RtcEngineContext(appId: agoraAppId));
-      await _agoraEngine!.setClientRole(role: ClientRoleType.clientRoleAudience);
-      await _agoraEngine!.enableAudio(); // 音声エンジン有効化
-      // iOSのAVAudioSessionをAgoraに触らせない（iOSのみ）
+      // iOSのAVAudioSessionをAgoraに触らせない設定はenableAudio()より前に必須
       if (defaultTargetPlatform == TargetPlatform.iOS) {
         await _agoraEngine!.setParameters('{"che.audio.ios.audioSessionRestriction": 128}');
         await _agoraEngine!.setParameters('{"che.audio.enable.bt.hfp": false}');
       }
+      await _agoraEngine!.setClientRole(role: ClientRoleType.clientRoleAudience);
+      await _agoraEngine!.enableAudio(); // 音声エンジン有効化（セッション制限設定後）
       await _agoraEngine!.muteLocalAudioStream(true); // マイクはミュート状態で待機
       await _agoraEngine!.setAudioProfile(
         profile: AudioProfileType.audioProfileMusicHighQuality,
@@ -129,6 +130,10 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
           debugPrint('Agora参加成功: ${connection.channelId}');
           if (mounted) setState(() => _agoraJoined = true);
         },
+        onLeaveChannel: (connection, stats) {
+          debugPrint('Agoraチャンネル離脱');
+          if (mounted) setState(() => _agoraJoined = false);
+        },
         onUserOffline: (connection, remoteUid, reason) {
           debugPrint('ユーザー退出: $remoteUid');
         },
@@ -136,20 +141,55 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
           debugPrint('Agoraエラー: $err $msg');
         },
       ));
+      // ドライブモードでaudienceとして参加（audioSessionRestriction:128によりBluetooth音楽に影響しない）
       await _agoraEngine!.joinChannel(
         token: '',
         channelId: widget.roomCode,
         uid: 0,
         options: const ChannelMediaOptions(
           channelProfile: ChannelProfileType.channelProfileCommunication,
-          clientRoleType: ClientRoleType.clientRoleBroadcaster,
+          clientRoleType: ClientRoleType.clientRoleAudience,
           publishMicrophoneTrack: false,
           autoSubscribeAudio: true,
         ),
       );
-      debugPrint('Agoraチャンネル参加中: ${widget.roomCode}');
+      debugPrint('Agora初期化完了（ドライブモード受信待機中）');
     } catch (e) {
       debugPrint('Agora初期化エラー: $e');
+    }
+  }
+
+  // 通話モード切替時: audienceからbroadcasterへロール変更
+  Future<void> _joinAgoraChannel() async {
+    try {
+      await _agoraEngine?.updateChannelMediaOptions(const ChannelMediaOptions(
+        channelProfile: ChannelProfileType.channelProfileCommunication,
+        clientRoleType: ClientRoleType.clientRoleBroadcaster,
+        publishMicrophoneTrack: false,
+        autoSubscribeAudio: true,
+      ));
+      debugPrint('Agora通話モード（broadcaster）切替: ${widget.roomCode}');
+    } catch (e) {
+      debugPrint('Agora参加エラー: $e');
+    }
+  }
+
+  // ドライブモード切替時: broadcasterからaudienceへロール変更（チャンネルは継続参加）
+  Future<void> _leaveAgoraChannel() async {
+    try {
+      await _agoraEngine?.updateChannelMediaOptions(const ChannelMediaOptions(
+        channelProfile: ChannelProfileType.channelProfileCommunication,
+        clientRoleType: ClientRoleType.clientRoleAudience,
+        publishMicrophoneTrack: false,
+        autoSubscribeAudio: true,
+      ));
+      await _agoraEngine?.muteLocalAudioStream(true);
+      if (defaultTargetPlatform == TargetPlatform.iOS) {
+        await _audioChannel.invokeMethod('restoreSession');
+      }
+      debugPrint('Agoraドライブモード（audience）切替');
+    } catch (e) {
+      debugPrint('Agora離脱エラー: $e');
     }
   }
   Future<void> _startExpiryCheck() async {
@@ -238,13 +278,17 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
       final isNowReceiving = val != null && val != widget.userId;
       if (!wasReceiving && isNowReceiving) {
         await _agoraEngine?.setDefaultAudioRouteToSpeakerphone(true);
-      } else if (wasReceiving && !isNowReceiving) {
-        // 受信終了 → 送信準備（次のPTTを即座に送信できるよう準備）
-        await _agoraEngine?.updateChannelMediaOptions(const ChannelMediaOptions(
-          publishMicrophoneTrack: false,
-          clientRoleType: ClientRoleType.clientRoleBroadcaster,
-        ));
-        await _agoraEngine?.muteLocalAudioStream(true);
+      } else if (wasReceiving && !isNowReceiving && _voiceMode == 'talk') {
+        // 受信終了（通話モードのみ）→ 送信準備
+        try {
+          await _agoraEngine?.updateChannelMediaOptions(const ChannelMediaOptions(
+            publishMicrophoneTrack: false,
+            clientRoleType: ClientRoleType.clientRoleBroadcaster,
+          ));
+          await _agoraEngine?.muteLocalAudioStream(true);
+        } catch (e) {
+          debugPrint('受信終了処理エラー: $e');
+        }
       }
       if (mounted) {
         setState(() {
@@ -661,6 +705,43 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
     }
   }
 
+  Future<void> _onModeSwitchTap(String mode) async {
+    if (_voiceMode == mode) return;
+    if (mode == 'talk') {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: const Color(0xFF0D1B2A),
+          title: const Text('通話モードに切り替えますか？',
+              style: TextStyle(color: Colors.white)),
+          content: const Text(
+            '通話モードに切り替えると、音楽アプリは使用できなくなります。',
+            style: TextStyle(color: Colors.white70),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('キャンセル',
+                  style: TextStyle(color: Colors.grey)),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('切り替える',
+                  style: TextStyle(color: Color(0xFFFF6B35))),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true) return;
+      // 通話モード: チャンネルに参加してオーディオを有効化
+      await _joinAgoraChannel();
+    } else {
+      // ドライブモード: チャンネルから完全離脱してBluetoothセッションを解放
+      await _leaveAgoraChannel();
+    }
+    if (mounted) setState(() => _voiceMode = mode);
+  }
+
   Future<void> _startRecording() async {
     debugPrint('録音開始試行: _isOtherRecording=$_isOtherRecording, _isRecording=$_isRecording');
     if (_isOtherRecording || _isRecording) return;
@@ -920,6 +1001,77 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
     );
   }
 
+  Widget _buildModeSwitch() {
+    final isDrive = _voiceMode == 'drive';
+    return Container(
+      width: 58,
+      decoration: BoxDecoration(
+        color: const Color(0xFF1A2A40),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.white24),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // ドライブモードボタン
+          GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () => _onModeSwitchTap('drive'),
+            child: Container(
+              width: 58,
+              padding: const EdgeInsets.symmetric(vertical: 10),
+              decoration: BoxDecoration(
+                color: isDrive ? const Color(0xFF1565C0) : Colors.transparent,
+                borderRadius: const BorderRadius.vertical(top: Radius.circular(11)),
+              ),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(Icons.music_note,
+                      color: isDrive ? Colors.white : Colors.white38, size: 20),
+                  const SizedBox(height: 2),
+                  Text('Drive',
+                      style: TextStyle(
+                          color: isDrive ? Colors.white : Colors.white38,
+                          fontSize: 9,
+                          fontWeight: FontWeight.bold)),
+                ],
+              ),
+            ),
+          ),
+          const Divider(height: 1, color: Colors.white24),
+          // 通話モードボタン
+          GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () => _onModeSwitchTap('talk'),
+            child: Container(
+              width: 58,
+              padding: const EdgeInsets.symmetric(vertical: 10),
+              decoration: BoxDecoration(
+                color: isDrive ? Colors.transparent : const Color(0xFFFF6B35),
+                borderRadius:
+                    const BorderRadius.vertical(bottom: Radius.circular(11)),
+              ),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(Icons.mic,
+                      color: isDrive ? Colors.white38 : Colors.white, size: 20),
+                  const SizedBox(height: 2),
+                  Text('Talk',
+                      style: TextStyle(
+                          color: isDrive ? Colors.white38 : Colors.white,
+                          fontSize: 9,
+                          fontWeight: FontWeight.bold)),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildRecButton() {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
@@ -969,15 +1121,17 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
                   ),
                 ],
               ),
-              const SizedBox(width: 12),
+              const SizedBox(width: 8),
+              _buildModeSwitch(),
+              const SizedBox(width: 8),
               Expanded(
                 child:
           GestureDetector(
-            onTapDown: (_) async {
+            onTapDown: _voiceMode == 'drive' ? null : (_) async {
               await _agoraEngine?.muteLocalAudioStream(false);
             },
-            onLongPressStart: _isOtherRecording ? null : (_) => _startRecording(),
-            onLongPressEnd: _isOtherRecording ? null : (_) => _stopRecording(),
+            onLongPressStart: (_voiceMode == 'drive' || _isOtherRecording) ? null : (_) => _startRecording(),
+            onLongPressEnd: (_voiceMode == 'drive' || _isOtherRecording) ? null : (_) => _stopRecording(),
             child: AnimatedBuilder(
               animation: _pulseController,
               builder: (_, __) => Container(
@@ -985,12 +1139,14 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
                 height: 160,
                 decoration: BoxDecoration(
                   borderRadius: BorderRadius.circular(40),
-                  color: _isOtherRecording
-                      ? Colors.grey
-                      : _isRecording
-                          ? Color.lerp(Colors.red, Colors.redAccent, _pulseController.value)!
-                          : const Color(0xFFFF6B35),
-                  boxShadow: [
+                  color: _voiceMode == 'drive'
+                      ? const Color(0xFF1A3A5C)
+                      : _isOtherRecording
+                          ? Colors.grey
+                          : _isRecording
+                              ? Color.lerp(Colors.red, Colors.redAccent, _pulseController.value)!
+                              : const Color(0xFFFF6B35),
+                  boxShadow: _voiceMode == 'drive' ? [] : [
                     BoxShadow(
                       color: (_isOtherRecording
                               ? Colors.grey
@@ -1005,16 +1161,22 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
                     Icon(
-                      _isRecording ? Icons.mic : Icons.mic_none,
-                      color: Colors.white,
+                      _voiceMode == 'drive' ? Icons.headphones : (_isRecording ? Icons.mic : Icons.mic_none),
+                      color: _voiceMode == 'drive' ? Colors.white54 : Colors.white,
                       size: 36,
                     ),
                     const SizedBox(width: 12),
                     Text(
-                      _isOtherRecording ? '録音中(他ユーザー)' : _isRecording ? '送信中...' : '押してる間、全員へ送信',
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 18,
+                      _voiceMode == 'drive'
+                          ? '受信のみ（ドライブモード）'
+                          : _isOtherRecording
+                              ? '録音中(他ユーザー)'
+                              : _isRecording
+                                  ? '送信中...'
+                                  : '押してる間、全員へ送信',
+                      style: TextStyle(
+                        color: _voiceMode == 'drive' ? Colors.white54 : Colors.white,
+                        fontSize: _voiceMode == 'drive' ? 15 : 18,
                         fontWeight: FontWeight.bold,
                       ),
                     ),
