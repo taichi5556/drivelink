@@ -1,26 +1,20 @@
 import 'dart:async';
 import 'dart:math';
+import 'dart:convert';
+import 'dart:io';
 
-import 'package:agora_rtc_engine/agora_rtc_engine.dart';
 import 'package:firebase_core/firebase_core.dart';
-import 'package:flutter/foundation.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:firebase_database/firebase_database.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:permission_handler/permission_handler.dart';
-import 'package:vibration/vibration.dart';
+import 'package:google_mobile_ads/google_mobile_ads.dart';
 import 'login_screen.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:app_links/app_links.dart';
-import 'dart:convert';
-import 'dart:io';
-import 'package:url_launcher/url_launcher.dart';
 import 'package:flutter_polyline_points/flutter_polyline_points.dart';
-
-const String agoraAppId = '9b3f59b1a52245b88a7cfbd33236f333';
 
 class MainScreen extends StatefulWidget {
   final String userId;
@@ -37,24 +31,17 @@ class MainScreen extends StatefulWidget {
   State<MainScreen> createState() => _MainScreenState();
 }
 
-class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
+class _MainScreenState extends State<MainScreen> {
   GoogleMapController? _mapController;
   bool _isFollowingMember = false;
-  /// ユーザー操作ではない animateCamera 中は onCameraMoveStarted で追従モードにしない
   bool _programmaticCameraMove = false;
   Set<Marker> _markers = {};
   LatLng _myPosition = const LatLng(35.6812, 139.7671);
-  bool _isRecording = false;
-  bool _isOtherRecording = false;
-  String _voiceMode = 'drive'; // 'drive': ドライブモード / 'talk': 通話モード
   Timer? _expiryTimer;
   String _remainingTime = '';
   Timer? _countdownTimer;
   Timer? _locationTimer;
   bool _updateLocationInProgress = false;
-  String _fromNickname = '';
-  bool _showReceiving = false;
-  late AnimationController _pulseController;
   Map<String, dynamic> _members = {};
   StreamSubscription? _membersSubscription;
 
@@ -62,18 +49,15 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
   LatLng? _groupDestination;
   String _groupDestName = '';
   StreamSubscription? _destSubscription;
-  Set<Polyline> _polylines = {}; // ルート線
+  Set<Polyline> _polylines = {};
   StreamSubscription? _appLinkSubscription;
   final _appLinks = AppLinks();
   LatLng? get _activeDestination => _groupDestination;
   String get _activeDestName => _groupDestName;
 
-  // Agora
-  RtcEngine? _agoraEngine;
-  final _audioChannel = const MethodChannel('drivelink/audio');
-  bool _agoraJoined = false;
-  int _recordSeconds = 0;
-  Timer? _recordTimer;
+  // AdMob
+  BannerAd? _bannerAd;
+  bool _isBannerAdLoaded = false;
 
   DatabaseReference get _db => FirebaseDatabase.instanceFor(
         app: Firebase.app(),
@@ -85,104 +69,40 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
   void initState() {
     super.initState();
     WakelockPlus.enable();
-    _pulseController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 800),
-    )..repeat(reverse: true);
     _initAll();
+    _loadBannerAd();
   }
 
   Future<void> _initAll() async {
-    await Permission.microphone.request();
     await Permission.locationWhenInUse.request();
-    await _initAgora();
     await _updateLocation();
     _locationTimer = Timer.periodic(
       const Duration(seconds: 5),
       (_) => _updateLocation(),
     );
     _listenToMembers();
-    _listenToRecordingUser();
     _listenToDestination();
     _initAppLinks();
     _startExpiryCheck();
   }
 
-  Future<void> _initAgora() async {
-    try {
-      _agoraEngine = createAgoraRtcEngine();
-      await _agoraEngine!.initialize(RtcEngineContext(appId: agoraAppId));
-      // iOSのAVAudioSessionをAgoraに触らせない設定はenableAudio()より前に必須
-      if (defaultTargetPlatform == TargetPlatform.iOS) {
-        await _agoraEngine!.setParameters('{"che.audio.ios.audioSessionRestriction": 128}');
-        await _agoraEngine!.setParameters('{"che.audio.enable.bt.hfp": false}');
-      }
-      await _agoraEngine!.setClientRole(role: ClientRoleType.clientRoleAudience);
-      await _agoraEngine!.enableAudio(); // 音声エンジン有効化（セッション制限設定後）
-      await _agoraEngine!.muteLocalAudioStream(true); // マイクはミュート状態で待機
-      await _agoraEngine!.setAudioProfile(
-        profile: AudioProfileType.audioProfileMusicHighQuality,
-        scenario: AudioScenarioType.audioScenarioChatroom,
-      );
-      await _agoraEngine!.setDefaultAudioRouteToSpeakerphone(true);
-      _agoraEngine!.registerEventHandler(RtcEngineEventHandler(
-        onJoinChannelSuccess: (connection, elapsed) {
-          debugPrint('Agora参加成功: ${connection.channelId}');
-          if (mounted) setState(() => _agoraJoined = true);
+  void _loadBannerAd() {
+    _bannerAd = BannerAd(
+      adUnitId: 'ca-app-pub-3940256099942544/6300978111',
+      size: AdSize.banner,
+      request: const AdRequest(),
+      listener: BannerAdListener(
+        onAdLoaded: (_) {
+          if (mounted) setState(() => _isBannerAdLoaded = true);
         },
-        onLeaveChannel: (connection, stats) {
-          debugPrint('Agoraチャンネル離脱');
-          if (mounted) setState(() => _agoraJoined = false);
+        onAdFailedToLoad: (ad, error) {
+          ad.dispose();
+          debugPrint('バナー広告読み込み失敗: $error');
         },
-        onUserOffline: (connection, remoteUid, reason) {
-          debugPrint('ユーザー退出: $remoteUid');
-        },
-        onError: (err, msg) {
-          debugPrint('Agoraエラー: $err $msg');
-        },
-      ));
-      // ドライブモードでaudienceとして参加（audioSessionRestriction:128によりBluetooth音楽に影響しない）
-      await _agoraEngine!.joinChannel(
-        token: '',
-        channelId: widget.roomCode,
-        uid: 0,
-        options: const ChannelMediaOptions(
-          channelProfile: ChannelProfileType.channelProfileCommunication,
-          clientRoleType: ClientRoleType.clientRoleAudience,
-          publishMicrophoneTrack: false,
-          autoSubscribeAudio: true,
-        ),
-      );
-      debugPrint('Agora初期化完了（ドライブモード受信待機中）');
-    } catch (e) {
-      debugPrint('Agora初期化エラー: $e');
-    }
+      ),
+    )..load();
   }
 
-  // 通話モード切替時: audienceのまま待機（broadcasterへの切替はPTT押下時のみ）
-  // → _joinAgoraChannel()ではAgoraのロールを変更しない（BT5.0 HFP起動防止）
-  Future<void> _joinAgoraChannel() async {
-    debugPrint('Agora通話モード待機（audienceのまま）');
-  }
-
-  // ドライブモード切替時: broadcasterからaudienceへロール変更（チャンネルは継続参加）
-  Future<void> _leaveAgoraChannel() async {
-    try {
-      await _agoraEngine?.updateChannelMediaOptions(const ChannelMediaOptions(
-        channelProfile: ChannelProfileType.channelProfileCommunication,
-        clientRoleType: ClientRoleType.clientRoleAudience,
-        publishMicrophoneTrack: false,
-        autoSubscribeAudio: true,
-      ));
-      await _agoraEngine?.muteLocalAudioStream(true);
-      if (defaultTargetPlatform == TargetPlatform.iOS) {
-        await _audioChannel.invokeMethod('restoreSession');
-      }
-      debugPrint('Agoraドライブモード（audience）切替');
-    } catch (e) {
-      debugPrint('Agora離脱エラー: $e');
-    }
-  }
   Future<void> _startExpiryCheck() async {
     final snapshot = await _db.child('rooms/${widget.roomCode}/info/expires_at').get();
     if (!mounted) return;
@@ -193,102 +113,75 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
       _exitDueToExpiry();
       return;
     }
-    // 5分前に警告
     if (remaining > 5 * 60 * 1000) {
       Timer(Duration(milliseconds: remaining - 5 * 60 * 1000), () {
         if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('⏰ ルームの使用時間まで残り5分です'),
-          backgroundColor: Color(0xFFFF6B35),
-          duration: Duration(seconds: 5),
-        ));
+        _startCountdown(expiresAt);
       });
+    } else {
+      _startCountdown(expiresAt);
     }
-    // カウントダウン表示開始
-    _startCountdown(expiresAt);
-    // 時間切れで自動退出
     _expiryTimer = Timer(Duration(milliseconds: remaining), () {
       if (mounted) _exitDueToExpiry();
     });
   }
 
   void _startCountdown(int expiresAt) {
-    _countdownTimer?.cancel();
-    _countdownTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+    _countdownTimer = Timer.periodic(const Duration(seconds: 30), (_) {
       if (!mounted) return;
       final remaining = expiresAt - DateTime.now().millisecondsSinceEpoch;
       if (remaining <= 0) {
-        _countdownTimer?.cancel();
-        setState(() => _remainingTime = '');
+        _exitDueToExpiry();
         return;
       }
-      final hours = remaining ~/ 3600000;
-      final minutes = (remaining % 3600000) ~/ 60000;
-      final seconds = (remaining % 60000) ~/ 1000;
-      final h = hours.toString();
-      final m = minutes.toString().padLeft(2, '0');
-      final s = seconds.toString().padLeft(2, '0');
+      final minutes = (remaining / 60000).ceil();
+      final hours = minutes ~/ 60;
+      final mins = minutes % 60;
       setState(() {
-        _remainingTime = hours > 0
-            ? '⏰ 残り ' + h + '時間' + m + '分'
-            : '⏰ 残り ' + m + '分' + s + '秒';
+        _remainingTime = hours > 0 ? '残り約${hours}時間${mins}分' : '残り約${mins}分';
       });
+    });
+    final remaining = expiresAt - DateTime.now().millisecondsSinceEpoch;
+    final minutes = (remaining / 60000).ceil();
+    final hours = minutes ~/ 60;
+    final mins = minutes % 60;
+    setState(() {
+      _remainingTime = hours > 0 ? '残り約${hours}時間${mins}分' : '残り約${mins}分';
     });
   }
 
   void _exitDueToExpiry() {
-    _db.child('rooms/${widget.roomCode}/members/${widget.userId}').remove();
     if (!mounted) return;
     showDialog(
       context: context,
       barrierDismissible: false,
-      builder: (_) => AlertDialog(
+      builder: (ctx) => AlertDialog(
         backgroundColor: const Color(0xFF0D1B2A),
-        title: const Text('⏰ ルーム時間終了', style: TextStyle(color: Colors.white)),
-        content: const Text('設定した使用時間が終了しました。お疲れ様でした！', style: TextStyle(color: Colors.white70)),
+        title: const Text('ルームの有効期限が切れました', style: TextStyle(color: Colors.white)),
+        content: const Text('ルームを退出します。', style: TextStyle(color: Colors.white70)),
         actions: [
           TextButton(
             onPressed: () {
-              Navigator.of(context).pop();
-              Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const LoginScreen()));
+              Navigator.pop(ctx);
+              Navigator.pushReplacement(
+                context,
+                MaterialPageRoute(builder: (_) => const LoginScreen()),
+              );
             },
-            child: const Text('OK', style: TextStyle(color: Color(0xFF00D4FF))),
+            child: const Text('OK', style: TextStyle(color: Color(0xFFFF6B35))),
           ),
         ],
       ),
     );
   }
 
-  void _listenToRecordingUser() {
-    _db.child('rooms/${widget.roomCode}/recording_user').onValue.listen((event) async {
-      final val = event.snapshot.value as String?;
-      final otherNick = val != null && val != widget.userId
-          ? ((_members[val] as Map?)?['nickname'] as String? ?? '他のユーザー')
-          : '';
-      final wasReceiving = _isOtherRecording;
-      final isNowReceiving = val != null && val != widget.userId;
-      if (!wasReceiving && isNowReceiving) {
-        await _agoraEngine?.setDefaultAudioRouteToSpeakerphone(true);
-      }
-      if (mounted) {
-        setState(() {
-          _isOtherRecording = isNowReceiving;
-          if (_isOtherRecording) _fromNickname = otherNick;
-          _showReceiving = _isOtherRecording;
-        });
-      }
-    });
-  }
-
   Future<void> _initAppLinks() async {
-    // アプリ起動時のリンクを処理
     try {
       final initialLink = await _appLinks.getInitialLink();
       if (initialLink != null) _handleAppLink(initialLink);
     } catch (e) {
       debugPrint('AppLinks初期化エラー: $e');
     }
-    // アプリ起動中のリンクを監視
     _appLinkSubscription = _appLinks.uriLinkStream.listen(
       _handleAppLink,
       onError: (e) => debugPrint('AppLinksエラー: $e'),
@@ -301,60 +194,48 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
     double? lng;
     String name = '共有目的地';
 
-    // Google Maps URLパターン例：
-    // https://maps.google.com/?q=35.6762,139.6503
-    // https://www.google.com/maps/place/.../@35.6762,139.6503
-    // drivevoice://destination?lat=35.6762&lng=139.6503&name=道の駅A
-
     if (uri.scheme == 'drivevoice') {
       lat = double.tryParse(uri.queryParameters['lat'] ?? '');
       lng = double.tryParse(uri.queryParameters['lng'] ?? '');
       name = uri.queryParameters['name'] ?? '共有目的地';
     } else {
       // Google Maps URLから緯度経度を抽出
-      final query = uri.queryParameters['q'] ?? '';
-      final coords = RegExp(r'(-?\d+\.\d+),(-?\d+\.\d+)').firstMatch(query);
-      if (coords != null) {
-        lat = double.tryParse(coords.group(1) ?? '');
-        lng = double.tryParse(coords.group(2) ?? '');
-      }
-      // @lat,lng パターン
-      if (lat == null) {
-        final atCoords = RegExp(r'@(-?\d+\.\d+),(-?\d+\.\d+)').firstMatch(uri.toString());
-        if (atCoords != null) {
-          lat = double.tryParse(atCoords.group(1) ?? '');
-          lng = double.tryParse(atCoords.group(2) ?? '');
+      final path = uri.toString();
+      final atIndex = path.indexOf('@');
+      if (atIndex != -1) {
+        final afterAt = path.substring(atIndex + 1);
+        final parts = afterAt.split(',');
+        if (parts.length >= 2) {
+          lat = double.tryParse(parts[0]);
+          lng = double.tryParse(parts[1]);
         }
       }
-      // place名を取得
-      final pathSegments = uri.pathSegments;
-      if (pathSegments.contains('place') && pathSegments.length > pathSegments.indexOf('place') + 1) {
-        name = Uri.decodeComponent(pathSegments[pathSegments.indexOf('place') + 1]).replaceAll('+', ' ');
+      if (lat == null) {
+        final qParam = uri.queryParameters['q'];
+        if (qParam != null) {
+          final parts = qParam.split(',');
+          if (parts.length >= 2) {
+            lat = double.tryParse(parts[0]);
+            lng = double.tryParse(parts[1]);
+          }
+        }
       }
     }
 
     if (lat != null && lng != null) {
-      if (!mounted) return;
-      setState(() {
-        _groupDestination = LatLng(lat!, lng!);
-        _groupDestName = name;
-      });
-      _updateDestinationMarker();
-      // 目的地にカメラを移動
-      _animateCamera(CameraUpdate.newLatLng(LatLng(lat, lng)), programmatic: true);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('📍 目的地を設定しました：$name'),
-          backgroundColor: const Color(0xFF1A3A5C),
-          action: SnackBarAction(
-            label: 'グループに共有',
-            textColor: const Color(0xFF00D4FF),
-            onPressed: _shareGroupDestination,
+      if (mounted) {
+        setState(() {
+          _groupDestination = LatLng(lat!, lng!);
+          _groupDestName = name;
+        });
+        _updateDestinationMarker();
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('📍「$name」を目的地に設定しました'),
+            backgroundColor: const Color(0xFF1A3A5C),
           ),
-        ),
-      );
-    } else {
-      debugPrint('緯度経度の抽出失敗: $uri');
+        );
+      }
     }
   }
 
@@ -401,19 +282,17 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
           icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueBlue),
           infoWindow: InfoWindow(title: name),
         ));
-        _fetchRoute(dest); // ルート取得
+        _fetchRoute(dest);
       } else {
-        setState(() => _polylines = {}); // 目的地なしでルート消去
+        setState(() => _polylines = {});
       }
     });
   }
 
   Future<void> _fetchRoute(LatLng dest) async {
-    if (_myPosition == null) return;
-    debugPrint('_fetchRoute開始: dest=$dest');
     const apiKey = 'AIzaSyChuUZypiVhojgCO6ZgZML-ZW3eYLtti5c';
     try {
-      final origin = '${_myPosition!.latitude},${_myPosition!.longitude}';
+      final origin = '${_myPosition.latitude},${_myPosition.longitude}';
       final destination = '${dest.latitude},${dest.longitude}';
       final url = 'https://maps.googleapis.com/maps/api/directions/json'
           '?origin=$origin&destination=$destination'
@@ -423,17 +302,14 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
       final response = await request.close();
       final body = await response.transform(const Utf8Decoder()).join();
       final data = jsonDecode(body);
-      debugPrint('Directions API status: ${data["status"]}');
       if (data['status'] == 'OK') {
         final steps = data['routes'][0]['legs'][0]['steps'] as List;
-        final polyPts = PolylinePoints(apiKey: apiKey);
         final allCoords = <LatLng>[];
         for (final step in steps) {
           final encoded = step['polyline']['points'] as String;
           final points = PolylinePoints.decodePolyline(encoded);
           allCoords.addAll(points.map((p) => LatLng(p.latitude, p.longitude)));
         }
-        debugPrint('詳細ルートpoints=${allCoords.length}');
         if (allCoords.isNotEmpty && mounted) {
           setState(() {
             _polylines = {
@@ -446,17 +322,16 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
             };
           });
           _animateCamera(
-            CameraUpdate.newLatLngZoom(_myPosition!, 14),
+            CameraUpdate.newLatLngZoom(_myPosition, 14),
             programmatic: true,
           );
         }
-      } else {
-        debugPrint('ルートなし: ${data["status"]}');
       }
     } catch (e) {
       debugPrint('ルート取得エラー: $e');
     }
   }
+
   Future<void> _setPersonalDestination() async {
     final TextEditingController searchCtrl = TextEditingController();
     List<Map<String, dynamic>> searchResults = [];
@@ -475,7 +350,6 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                // 検索バー
                 TextField(
                   controller: searchCtrl,
                   style: const TextStyle(color: Colors.white),
@@ -499,9 +373,8 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
                     try {
                       final encoded = Uri.encodeComponent(val);
                       final url = 'https://maps.googleapis.com/maps/api/place/textsearch/json?query=$encoded&language=ja&region=jp&key=$placesApiKey';
-                      final uri = Uri.parse(url);
                       final client = HttpClient();
-                      final request = await client.getUrl(uri);
+                      final request = await client.getUrl(Uri.parse(url));
                       final response = await request.close();
                       final body = await response.transform(const Utf8Decoder()).join();
                       final data = jsonDecode(body);
@@ -528,7 +401,6 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
                   },
                 ),
                 const SizedBox(height: 8),
-                // 検索結果リスト
                 if (searchResults.isNotEmpty)
                   ConstrainedBox(
                     constraints: const BoxConstraints(maxHeight: 250),
@@ -553,21 +425,19 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
                       },
                     ),
                   ),
-                // 現在地ボタン
                 const SizedBox(height: 4),
-                if (_myPosition != null)
-                  TextButton.icon(
-                    icon: const Icon(Icons.my_location, color: Color(0xFF00D4FF), size: 18),
-                    label: const Text('現在地を目的地に設定', style: TextStyle(color: Color(0xFF00D4FF))),
-                    onPressed: () {
-                      setState(() {
-                        _groupDestination = _myPosition;
-                        _groupDestName = '現在地';
-                      });
-                      _updateDestinationMarker();
-                      Navigator.pop(ctx);
-                    },
-                  ),
+                TextButton.icon(
+                  icon: const Icon(Icons.my_location, color: Color(0xFF00D4FF), size: 18),
+                  label: const Text('現在地を目的地に設定', style: TextStyle(color: Color(0xFF00D4FF))),
+                  onPressed: () {
+                    setState(() {
+                      _groupDestination = _myPosition;
+                      _groupDestName = '現在地';
+                    });
+                    _updateDestinationMarker();
+                    Navigator.pop(ctx);
+                  },
+                ),
               ],
             ),
           ),
@@ -685,114 +555,6 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
     }
   }
 
-  Future<void> _onModeSwitchTap(String mode) async {
-    if (_voiceMode == mode) return;
-    if (mode == 'talk') {
-      final confirmed = await showDialog<bool>(
-        context: context,
-        builder: (ctx) => AlertDialog(
-          backgroundColor: const Color(0xFF0D1B2A),
-          title: const Text('通話モードに切り替えますか？',
-              style: TextStyle(color: Colors.white)),
-          content: const Text(
-            '通話モードに切り替えると、音楽アプリは使用できなくなります。',
-            style: TextStyle(color: Colors.white70),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: const Text('キャンセル',
-                  style: TextStyle(color: Colors.grey)),
-            ),
-            TextButton(
-              onPressed: () => Navigator.pop(ctx, true),
-              child: const Text('切り替える',
-                  style: TextStyle(color: Color(0xFFFF6B35))),
-            ),
-          ],
-        ),
-      );
-      if (confirmed != true) return;
-      // 通話モード: チャンネルに参加してオーディオを有効化
-      await _joinAgoraChannel();
-    } else {
-      // ドライブモード: チャンネルから完全離脱してBluetoothセッションを解放
-      await _leaveAgoraChannel();
-    }
-    if (mounted) setState(() => _voiceMode = mode);
-  }
-
-  Future<void> _startRecording() async {
-    debugPrint('録音開始試行: _isOtherRecording=$_isOtherRecording, _isRecording=$_isRecording');
-    if (_isOtherRecording || _isRecording) return;
-    if (!_agoraJoined) {
-      debugPrint('Agora未接続のため録音不可');
-      return;
-    }
-
-    // iOS/Android両対応の振動フィードバック（録音開始を通知）
-    if (await Vibration.hasVibrator() ?? false) {
-      Vibration.vibrate(duration: 100); // 100ms の短い振動
-    }
-
-    // マイクトラックを有効化
-    try {
-      await _agoraEngine?.updateChannelMediaOptions(const ChannelMediaOptions(
-        publishMicrophoneTrack: true,
-        clientRoleType: ClientRoleType.clientRoleBroadcaster,
-      ));
-    } catch (e) {
-      debugPrint('startRecording Agora error: $e');
-      return;
-    }
-    // 受信直後の場合に備えて少し待機
-    if (_isOtherRecording == false) {
-      await Future.delayed(const Duration(milliseconds: 300));
-    }
-    await _db.child('rooms/${widget.roomCode}/recording_user').set(widget.userId);
-    try {
-      await _agoraEngine?.muteLocalAudioStream(false);
-      if (mounted) setState(() { _isRecording = true; _recordSeconds = 0; });
-      _recordTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-        setState(() => _recordSeconds++);
-        if (_recordSeconds >= 20) _stopRecording();
-      });
-      debugPrint('Agora録音開始');
-    } catch (e) {
-      debugPrint('録音開始エラー: $e');
-      await _db.child('rooms/${widget.roomCode}/recording_user').remove();
-    }
-  }
-
-  Future<void> _stopRecording() async {
-    // 送信バイブレーション（2回目タップ）
-    if (await Vibration.hasVibrator() ?? false) {
-      Vibration.vibrate(duration: 100);
-    }
-    // マイクトラックを無効化してaudienceへ戻す（HFP解除）
-    if (_agoraJoined) {
-      try {
-        await _agoraEngine?.updateChannelMediaOptions(const ChannelMediaOptions(
-          publishMicrophoneTrack: false,
-          clientRoleType: ClientRoleType.clientRoleAudience,
-          autoSubscribeAudio: true,
-        ));
-      } catch (e) {
-        debugPrint('stopRecording Agora error: $e');
-      }
-    }
-    _recordTimer?.cancel();
-    try {
-      await _agoraEngine?.muteLocalAudioStream(true);
-    } catch (e) {
-      debugPrint('録音停止エラー: $e');
-    }
-    await _db.child('rooms/${widget.roomCode}/recording_user').remove();
-    if (mounted) setState(() { _isRecording = false; _recordSeconds = 0; });
-
-    debugPrint('Agora録音停止');
-  }
-
   void _animateCamera(CameraUpdate update, {required bool programmatic}) {
     if (_mapController == null) return;
     if (programmatic) {
@@ -814,25 +576,36 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
   @override
   void dispose() {
     WakelockPlus.disable();
-    _pulseController.dispose();
     _locationTimer?.cancel();
-    _recordTimer?.cancel();
+    _countdownTimer?.cancel();
+    _expiryTimer?.cancel();
     _membersSubscription?.cancel();
-    _db.child('rooms/${widget.roomCode}/members/${widget.userId}').remove();
     _destSubscription?.cancel();
     _appLinkSubscription?.cancel();
-    _db.child('rooms/${widget.roomCode}/recording_user').remove();
-    _agoraEngine?.leaveChannel();
-    _agoraEngine?.release();
+    _db.child('rooms/${widget.roomCode}/members/${widget.userId}').remove();
+    _bannerAd?.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    return OrientationBuilder(
+      builder: (context, orientation) {
+        if (orientation == Orientation.landscape) {
+          return _buildLandscapeLayout();
+        }
+        return _buildPortraitLayout();
+      },
+    );
+  }
+
+  // 縦向きレイアウト
+  Widget _buildPortraitLayout() {
     return Scaffold(
       backgroundColor: const Color(0xFF0A1628),
       appBar: AppBar(
         backgroundColor: const Color(0xFF0A1628),
+        titleSpacing: 12,
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -843,11 +616,6 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
           ],
         ),
         actions: [
-          if (_agoraJoined)
-            const Padding(
-              padding: EdgeInsets.only(right: 12),
-              child: Icon(Icons.wifi, color: Colors.green, size: 20),
-            ),
           TextButton.icon(
             icon: const Icon(Icons.exit_to_app, color: Colors.white, size: 18),
             label: const Text('退出', style: TextStyle(color: Colors.white, fontSize: 13)),
@@ -862,10 +630,77 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
         bottom: true,
         child: Column(
           children: [
-            if (_showReceiving) _buildReceivingBanner(),
             if (_remainingTime.isNotEmpty) _buildTimerBanner(),
-            Expanded(flex: 3, child: _buildMap()),
-            Expanded(flex: 2, child: _buildRecButton()),
+            Expanded(child: _buildMap()),
+            _buildBottomSection(),
+            if (_isBannerAdLoaded) _buildAdBanner(),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // 横向きレイアウト
+  Widget _buildLandscapeLayout() {
+    return Scaffold(
+      backgroundColor: const Color(0xFF0A1628),
+      body: SafeArea(
+        child: Row(
+          children: [
+            // 左: マップ（メイン）
+            Expanded(
+              flex: 3,
+              child: Column(
+                children: [
+                  if (_remainingTime.isNotEmpty) _buildTimerBanner(),
+                  Expanded(child: _buildMap()),
+                ],
+              ),
+            ),
+            // 右: サイドパネル
+            Container(
+              width: 180,
+              color: const Color(0xFF0D1B2A),
+              child: Column(
+                children: [
+                  // ルーム情報 + 退出ボタン
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                    color: const Color(0xFF0A1628),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text('DriveVoice',
+                                  style: GoogleFonts.audiowide(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold)),
+                              Text('${_members.length}人が走行中',
+                                  style: const TextStyle(color: Colors.grey, fontSize: 10)),
+                            ],
+                          ),
+                        ),
+                        GestureDetector(
+                          onTap: () => Navigator.pushReplacement(
+                            context,
+                            MaterialPageRoute(builder: (_) => const LoginScreen()),
+                          ),
+                          child: const Icon(Icons.exit_to_app, color: Colors.white54, size: 20),
+                        ),
+                      ],
+                    ),
+                  ),
+                  // メンバーリスト（縦向き）
+                  Expanded(
+                    child: _buildMemberListVertical(),
+                  ),
+                  // アクションボタン
+                  _buildActionButtons(),
+                  // 広告
+                  if (_isBannerAdLoaded) _buildAdBanner(),
+                ],
+              ),
+            ),
           ],
         ),
       ),
@@ -874,77 +709,27 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
 
   Widget _buildMap() {
     return ClipRRect(
-        borderRadius: BorderRadius.circular(16),
-        child: Stack(
-          children: [
-            GoogleMap(
-          initialCameraPosition: CameraPosition(target: _myPosition, zoom: 15),
-          markers: _markers,
-          polylines: _polylines,
-          onMapCreated: (c) => _mapController = c,
-          onCameraMoveStarted: () {
-            if (_programmaticCameraMove) {
-              _programmaticCameraMove = false;
-              return;
-            }
-            setState(() => _isFollowingMember = true);
-          },
-          onCameraIdle: () {
+      borderRadius: BorderRadius.circular(8),
+      child: GoogleMap(
+        initialCameraPosition: CameraPosition(target: _myPosition, zoom: 15),
+        markers: _markers,
+        polylines: _polylines,
+        onMapCreated: (c) => _mapController = c,
+        onCameraMoveStarted: () {
+          if (_programmaticCameraMove) {
             _programmaticCameraMove = false;
-          },
-          myLocationEnabled: false,
-          myLocationButtonEnabled: false,
-          zoomControlsEnabled: false,
-        ),
-            Positioned(
-              right: 8,
-              bottom: 70,
-              child: FloatingActionButton(
-                heroTag: 'share_route_btn',
-                backgroundColor: _groupDestination != null
-                    ? const Color(0xFF00D4FF)
-                    : Colors.grey[300],
-                onPressed: _groupDestination != null
-                    ? _shareGroupDestination
-                    : null,
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Icon(
-                      Icons.share,
-                      color: _groupDestination != null ? Colors.white : Colors.grey,
-                      size: 20,
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      'ルート共有',
-                      style: TextStyle(
-                        color: _groupDestination != null ? Colors.white : Colors.grey,
-                        fontSize: 9,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            Positioned(
-              right: 8,
-              bottom: 8,
-              child: FloatingActionButton.small(
-                backgroundColor: Colors.white,
-                onPressed: () {
-                  setState(() => _isFollowingMember = true);
-                  _animateCamera(
-                    CameraUpdate.newLatLng(_myPosition),
-                    programmatic: true,
-                  );
-                },
-                child: const Icon(Icons.my_location, color: Colors.grey),
-              ),
-            ),
-          ],
-        ),
-      );
+            return;
+          }
+          setState(() => _isFollowingMember = true);
+        },
+        onCameraIdle: () {
+          _programmaticCameraMove = false;
+        },
+        myLocationEnabled: false,
+        myLocationButtonEnabled: false,
+        zoomControlsEnabled: false,
+      ),
+    );
   }
 
   Widget _buildTimerBanner() {
@@ -968,215 +753,139 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
     );
   }
 
-  Widget _buildReceivingBanner() {
+  Widget _buildBottomSection() {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      color: const Color(0xFF1A3A5C),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          const Icon(Icons.volume_up, color: Colors.green, size: 20),
-          const SizedBox(width: 8),
-          Text(
-            _isOtherRecording ? '${_fromNickname}さんが話しています...' : '${_fromNickname}さんの声を受信中...',
-            style: const TextStyle(color: Colors.white, fontSize: 14),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildModeSwitch() {
-    final isDrive = _voiceMode == 'drive';
-    return Container(
-      width: 58,
-      decoration: BoxDecoration(
-        color: const Color(0xFF1A2A40),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Colors.white24),
-      ),
+      color: const Color(0xFF0D1B2A),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          // ドライブモードボタン
-          GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onTap: () => _onModeSwitchTap('drive'),
-            child: Container(
-              width: 58,
-              padding: const EdgeInsets.symmetric(vertical: 10),
-              decoration: BoxDecoration(
-                color: isDrive ? const Color(0xFF1565C0) : Colors.transparent,
-                borderRadius: const BorderRadius.vertical(top: Radius.circular(11)),
-              ),
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(Icons.music_note,
-                      color: isDrive ? Colors.white : Colors.white38, size: 20),
-                  const SizedBox(height: 2),
-                  Text('Drive',
-                      style: TextStyle(
-                          color: isDrive ? Colors.white : Colors.white38,
-                          fontSize: 9,
-                          fontWeight: FontWeight.bold)),
-                ],
-              ),
-            ),
+          _buildMemberList(),
+          const SizedBox(height: 6),
+          _buildActionButtons(),
+        ],
+      ),
+    );
+  }
+
+  // アクションボタン行（縦・横レイアウト共用）
+  Widget _buildActionButtons() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+        children: [
+          _buildActionBtn(
+            icon: _polylines.isNotEmpty ? Icons.stop : Icons.place,
+            label: _polylines.isNotEmpty ? 'ルート終了' : '目的地',
+            color: _polylines.isNotEmpty
+                ? Colors.redAccent
+                : _groupDestination != null
+                    ? const Color(0xFF1E90FF)
+                    : const Color(0xFF1A3A5C),
+            onTap: _polylines.isNotEmpty
+                ? () {
+                    setState(() {
+                      _groupDestination = null;
+                      _groupDestName = '';
+                      _polylines = {};
+                    });
+                    _updateDestinationMarker();
+                  }
+                : _setPersonalDestination,
           ),
-          const Divider(height: 1, color: Colors.white24),
-          // 通話モードボタン
-          GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onTap: () => _onModeSwitchTap('talk'),
-            child: Container(
-              width: 58,
-              padding: const EdgeInsets.symmetric(vertical: 10),
-              decoration: BoxDecoration(
-                color: isDrive ? Colors.transparent : const Color(0xFFFF6B35),
-                borderRadius:
-                    const BorderRadius.vertical(bottom: Radius.circular(11)),
-              ),
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(Icons.mic,
-                      color: isDrive ? Colors.white38 : Colors.white, size: 20),
-                  const SizedBox(height: 2),
-                  Text('Talk',
-                      style: TextStyle(
-                          color: isDrive ? Colors.white38 : Colors.white,
-                          fontSize: 9,
-                          fontWeight: FontWeight.bold)),
-                ],
-              ),
-            ),
+          _buildActionBtn(
+            icon: Icons.my_location,
+            label: '現在地',
+            color: const Color(0xFF1A3A5C),
+            onTap: () {
+              setState(() => _isFollowingMember = false);
+              _animateCamera(CameraUpdate.newLatLng(_myPosition), programmatic: true);
+            },
+          ),
+          _buildActionBtn(
+            icon: Icons.share,
+            label: 'ルート共有',
+            color: _groupDestination != null
+                ? const Color(0xFF00D4FF)
+                : Colors.grey.shade800,
+            onTap: _groupDestination != null ? _shareGroupDestination : null,
           ),
         ],
       ),
     );
   }
 
-  Widget _buildRecButton() {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-        children: [
-          _buildMemberList(),
-          const SizedBox(height: 2),
-          if (_isRecording)
-            Text(
-              '送信中... 残り ${30 - _recordSeconds}秒',
-              style: const TextStyle(color: Colors.redAccent, fontSize: 14),
-            ),
-          const SizedBox(height: 2),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  FloatingActionButton.small(
-                    heroTag: 'dest_btn',
-                    backgroundColor: _polylines.isNotEmpty
-                        ? Colors.redAccent
-                        : _groupDestination != null
-                            ? const Color(0xFF1E90FF)
-                            : const Color(0xFF1A3A5C),
-                    onPressed: _polylines.isNotEmpty
-                        ? () {
-                            setState(() {
-                              _groupDestination = null;
-                              _groupDestName = '';
-                              _polylines = {};
-                            });
-                            _updateDestinationMarker();
-                          }
-                        : _setPersonalDestination,
-                    child: Icon(
-                      _polylines.isNotEmpty ? Icons.stop : Icons.place,
-                      color: Colors.white,
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    _polylines.isNotEmpty ? '終了' : _groupDestination != null ? '共有' : '目的地',
-                    style: const TextStyle(color: Colors.white70, fontSize: 10),
-                  ),
-                ],
-              ),
-              const SizedBox(width: 8),
-              _buildModeSwitch(),
-              const SizedBox(width: 8),
-              Expanded(
-                child:
-          GestureDetector(
-            onTap: (_voiceMode == 'drive' || _isOtherRecording) ? null : () {
-              if (_isRecording) {
-                _stopRecording();
-              } else {
-                _startRecording();
-              }
-            },
-            child: AnimatedBuilder(
-              animation: _pulseController,
-              builder: (_, __) => Container(
-                width: 300,
-                height: 160,
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(40),
-                  color: _voiceMode == 'drive'
-                      ? const Color(0xFF1A3A5C)
-                      : _isOtherRecording
-                          ? Colors.grey
-                          : _isRecording
-                              ? Color.lerp(Colors.red, Colors.redAccent, _pulseController.value)!
-                              : const Color(0xFFFF6B35),
-                  boxShadow: _voiceMode == 'drive' ? [] : [
-                    BoxShadow(
-                      color: (_isOtherRecording
-                              ? Colors.grey
-                              : _isRecording ? Colors.red : const Color(0xFFFF6B35))
-                          .withAlpha((_pulseController.value * 180).toInt()),
-                      blurRadius: 20,
-                      spreadRadius: 5,
-                    ),
-                  ],
-                ),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Icon(
-                      _voiceMode == 'drive' ? Icons.headphones : (_isRecording ? Icons.mic : Icons.mic_none),
-                      color: _voiceMode == 'drive' ? Colors.white54 : Colors.white,
-                      size: 36,
-                    ),
-                    const SizedBox(width: 12),
-                    Text(
-                      _voiceMode == 'drive'
-                          ? '受信のみ（ドライブモード）'
-                          : _isOtherRecording
-                              ? '録音中(他ユーザー)'
-                              : _isRecording
-                                  ? 'タップして送信'
-                                  : 'タップして録音',
-                      style: TextStyle(
-                        color: _voiceMode == 'drive' ? Colors.white54 : Colors.white,
-                        fontSize: _voiceMode == 'drive' ? 15 : 18,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-              ),
-            ],
-          ),
-        ],
+  Widget _buildActionBtn({
+    required IconData icon,
+    required String label,
+    required Color color,
+    VoidCallback? onTap,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        decoration: BoxDecoration(
+          color: color,
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, color: Colors.white, size: 22),
+            const SizedBox(height: 2),
+            Text(label, style: const TextStyle(color: Colors.white, fontSize: 10)),
+          ],
+        ),
       ),
+    );
+  }
+
+  Widget _buildAdBanner() {
+    return Container(
+      alignment: Alignment.center,
+      width: _bannerAd!.size.width.toDouble(),
+      height: _bannerAd!.size.height.toDouble(),
+      child: AdWidget(ad: _bannerAd!),
+    );
+  }
+
+  // 横向き用: 縦スクロールのメンバーリスト
+  Widget _buildMemberListVertical() {
+    final uids = _members.keys.toList();
+    return ListView.builder(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      itemCount: uids.length,
+      itemBuilder: (context, index) {
+        final uid = uids[index];
+        final m = _members[uid] as Map;
+        final nick = m['nickname'] as String? ?? '?';
+        final lat = (m['lat'] as num).toDouble();
+        final lng = (m['lng'] as num).toDouble();
+        final dist = _calcDistance(lat, lng);
+        final isMe = uid == widget.userId;
+        return ListTile(
+          dense: true,
+          leading: CircleAvatar(
+            radius: 16,
+            backgroundColor: isMe ? const Color(0xFF1E90FF) : const Color(0xFFFF6B35),
+            child: Text(
+              nick.isNotEmpty ? nick[0].toUpperCase() : '?',
+              style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold),
+            ),
+          ),
+          title: Text(nick, style: const TextStyle(color: Colors.white, fontSize: 12)),
+          subtitle: Text(
+            isMe ? '自分' : '${dist.toStringAsFixed(1)}km',
+            style: TextStyle(color: Colors.grey[400], fontSize: 10),
+          ),
+          onTap: () {
+            setState(() => _isFollowingMember = true);
+            _mapController?.animateCamera(CameraUpdate.newLatLng(LatLng(lat, lng)));
+          },
+        );
+      },
     );
   }
 
