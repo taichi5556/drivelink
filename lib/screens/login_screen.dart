@@ -190,7 +190,7 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
   }
 
   void _shareRoomCode(String code) {
-    final link = 'drivevoice://join?room=$code';
+    final link = 'https://drivelink-a7ffb.web.app/join?room=$code';
     Share.share(_isJapanese
         ? 'DriveVoiceで一緒にドライブしよう！\nリンクをタップしてルームに参加👇\n$link\n\nリンクが使えない場合はルームコード: $code'
         : 'Join me on DriveVoice!\nTap the link to join👇\n$link\n\nRoom Code: $code');

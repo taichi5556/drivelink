@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DriveVoice - ルームに参加</title>
+  <style>
+    body {
+      background: #0D1B2A;
+      color: #fff;
+      font-family: sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      margin: 0;
+      text-align: center;
+      padding: 24px;
+      box-sizing: border-box;
+    }
+    h1 { font-size: 22px; margin-bottom: 8px; }
+    p { color: #aaa; font-size: 15px; margin-bottom: 32px; }
+    .btn {
+      background: #FF6B35;
+      color: #fff;
+      border: none;
+      border-radius: 12px;
+      padding: 16px 32px;
+      font-size: 17px;
+      font-weight: bold;
+      cursor: pointer;
+      text-decoration: none;
+      display: inline-block;
+    }
+    .code {
+      margin-top: 32px;
+      color: #aaa;
+      font-size: 14px;
+    }
+    .code span {
+      font-size: 20px;
+      font-weight: bold;
+      color: #00D4FF;
+      letter-spacing: 4px;
+      display: block;
+      margin-top: 8px;
+    }
+  </style>
+</head>
+<body>
+  <h1>DriveVoice</h1>
+  <p>タップしてルームに参加</p>
+  <a class="btn" id="join-btn" href="#">アプリで開く</a>
+  <div class="code">
+    ルームコード
+    <span id="room-code">-</span>
+  </div>
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const room = params.get('room') || '';
+    document.getElementById('room-code').textContent = room;
+    const deepLink = 'drivevoice://join?room=' + encodeURIComponent(room);
+    document.getElementById('join-btn').href = deepLink;
+    // 自動でアプリを開く
+    if (room) {
+      setTimeout(function() {
+        window.location.href = deepLink;
+      }, 500);
+    }
+  </script>
+</body>
+</html>
