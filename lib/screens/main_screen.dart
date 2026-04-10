@@ -349,7 +349,8 @@ class _MainScreenState extends State<MainScreen> {
 
     final emoji = vehicleType == 'bike' ? '🏍' : '🚗';
     final bgColor = isMe ? const Color(0xFF1E90FF) : const Color(0xFFFF6B35);
-    const size = 72.0;
+    // 高解像度で描画して imagePixelRatio で縮小表示（約20dp）
+    const size = 52.0;
 
     final recorder = ui.PictureRecorder();
     final canvas = Canvas(recorder);
@@ -357,29 +358,33 @@ class _MainScreenState extends State<MainScreen> {
     // 背景円
     canvas.drawCircle(
       const Offset(size / 2, size / 2),
-      size / 2 - 2,
+      size / 2 - 1,
       Paint()..color = bgColor,
     );
     // 白枠
     canvas.drawCircle(
       const Offset(size / 2, size / 2),
-      size / 2 - 2,
+      size / 2 - 1,
       Paint()
         ..color = Colors.white
         ..style = PaintingStyle.stroke
-        ..strokeWidth = 3,
+        ..strokeWidth = 2,
     );
 
     // 絵文字
     final tp = TextPainter(textDirection: TextDirection.ltr)
-      ..text = TextSpan(text: emoji, style: const TextStyle(fontSize: 36))
+      ..text = TextSpan(text: emoji, style: const TextStyle(fontSize: 22))
       ..layout();
     tp.paint(canvas, Offset((size - tp.width) / 2, (size - tp.height) / 2));
 
     final picture = recorder.endRecording();
     final image = await picture.toImage(size.toInt(), size.toInt());
     final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
-    final descriptor = BitmapDescriptor.bytes(bytes!.buffer.asUint8List());
+    // imagePixelRatio: 2.5 → 画面上の表示サイズ = 52 / 2.5 ≈ 20dp
+    final descriptor = BitmapDescriptor.bytes(
+      bytes!.buffer.asUint8List(),
+      imagePixelRatio: 2.5,
+    );
     _markerCache[key] = descriptor;
     return descriptor;
   }
