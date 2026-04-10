@@ -29,9 +29,10 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
   late Animation<double> _pulseAnim;
   StreamSubscription? _linkSub;
   bool _consentLocation = false;
+  bool _consentDriving  = false;
   String _vehicleType = 'car'; // 'car' or 'bike'
   int _selectedHours = 4;  // デフォルト4時間
-  bool get _allConsented => _consentLocation;
+  bool get _allConsented => _consentLocation && _consentDriving;
 
   @override
   void initState() {
@@ -316,13 +317,24 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
           value: _consentLocation,
           onChanged: (v) => setState(() => _consentLocation = v ?? false),
         ),
+        const SizedBox(height: 6),
+        _buildConsentTile(
+          icon: Icons.car_crash_rounded,
+          iconColor: const Color(0xFFFF6B35),
+          text: _isJapanese
+              ? '運転中はアプリを操作しないでください。'
+              : 'Do not operate this app while driving.',
+          value: _consentDriving,
+          onChanged: (v) => setState(() => _consentDriving = v ?? false),
+          isWarning: true,
+        ),
         if (!_allConsented) ...[
           const SizedBox(height: 8),
           Center(
             child: Text(
               _isJapanese
-                  ? 'チェックを入れると開始できます'
-                  : 'Check the box to continue',
+                  ? '両方にチェックを入れると開始できます'
+                  : 'Check both boxes to continue',
               style: const TextStyle(
                 color: Color(0xFF3A5070),
                 fontSize: 11,
