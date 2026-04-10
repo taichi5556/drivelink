@@ -11,7 +11,7 @@
         <uses-permission android:name="android.permission.VIBRATE"/>
 <application
         android:name="androidx.multidex.MultiDexApplication"
-        android:label="DriveVoice"
+        android:label="TouriLink"
         android:icon="@mipmap/ic_launcher">
 
         <!-- Google Maps APIキー -->

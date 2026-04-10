@@ -200,8 +200,8 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
   void _shareRoomCode(String code) {
     final link = 'https://drivelink-a7ffb.web.app/join?room=$code';
     Share.share(_isJapanese
-        ? 'DriveVoiceで一緒にドライブしよう！\nリンクをタップしてルームに参加👇\n$link\n\nリンクが使えない場合はルームコード: $code'
-        : 'Join me on DriveVoice!\nTap the link to join👇\n$link\n\nRoom Code: $code');
+        ? 'TouriLinkで一緒にツーリングしよう！\nリンクをタップしてルームに参加👇\n$link\n\nリンクが使えない場合はルームコード: $code'
+        : 'Join me on TouriLink!\nTap the link to join👇\n$link\n\nRoom Code: $code');
   }
 
   void _copyRoomCode(String code) {
@@ -566,7 +566,7 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
               child: const Icon(Icons.directions_car_rounded, color: Colors.white, size: 24),
             )),
             const SizedBox(height: 4),
-            const Text('DriveVoice', style: TextStyle(fontSize: 22, fontWeight: FontWeight.w900, color: Colors.white, letterSpacing: 2)),
+            const Text('TouriLink', style: TextStyle(fontSize: 22, fontWeight: FontWeight.w900, color: Colors.white, letterSpacing: 2)),
             const SizedBox(height: 2),
             Text(_subtitle, style: const TextStyle(fontSize: 12, color: Color(0xFF6680AA), letterSpacing: 0.5)),
             const SizedBox(height: 8),

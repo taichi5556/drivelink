@@ -882,7 +882,7 @@ class _MainScreenState extends State<MainScreen> {
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('DriveVoice',
+            Text('TouriLink',
                 style: GoogleFonts.audiowide(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
             Text('ルーム: ${widget.roomCode} | ${_members.length}人が走行中',
                 style: const TextStyle(color: Colors.grey, fontSize: 12)),
@@ -946,7 +946,7 @@ class _MainScreenState extends State<MainScreen> {
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              Text('DriveVoice',
+                              Text('TouriLink',
                                   style: GoogleFonts.audiowide(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold)),
                               Text('${_members.length}人が走行中',
                                   style: const TextStyle(color: Colors.grey, fontSize: 10)),

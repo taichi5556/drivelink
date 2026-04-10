@@ -38,7 +38,7 @@ class DriveVoiceMainCarScreen(carContext: CarContext) : Screen(carContext) {
             if (currentSpeaker.isNotEmpty())
                 "${currentSpeaker}が話し中"
             else
-                "DriveVoice"
+                "TouriLink"
         )
             .setHeaderAction(Action.APP_ICON)
             .addAction(talkAction)
