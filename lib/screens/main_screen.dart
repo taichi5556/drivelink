@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:ui' as ui;
 
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
@@ -20,11 +21,13 @@ class MainScreen extends StatefulWidget {
   final String userId;
   final String nickname;
   final String roomCode;
+  final String vehicleType; // 'car' or 'bike'
   const MainScreen({
     Key? key,
     required this.userId,
     required this.nickname,
     required this.roomCode,
+    this.vehicleType = 'car',
   }) : super(key: key);
 
   @override
@@ -59,6 +62,9 @@ class _MainScreenState extends State<MainScreen> {
   Map<String, dynamic> _warnings = {};
   StreamSubscription? _warningsSubscription;
   Timer? _warningCleanupTimer;
+
+  // 車両マーカーキャッシュ（vehicleType-isMe → BitmapDescriptor）
+  final Map<String, BitmapDescriptor> _markerCache = {};
 
 
   // AdMob
@@ -337,26 +343,68 @@ class _MainScreenState extends State<MainScreen> {
     }
   }
 
-  void _rebuildMarkers() {
+  Future<BitmapDescriptor> _getVehicleMarker(String vehicleType, bool isMe) async {
+    final key = '$vehicleType-$isMe';
+    if (_markerCache.containsKey(key)) return _markerCache[key]!;
+
+    final emoji = vehicleType == 'bike' ? '🏍' : '🚗';
+    final bgColor = isMe ? const Color(0xFF1E90FF) : const Color(0xFFFF6B35);
+    const size = 72.0;
+
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder);
+
+    // 背景円
+    canvas.drawCircle(
+      const Offset(size / 2, size / 2),
+      size / 2 - 2,
+      Paint()..color = bgColor,
+    );
+    // 白枠
+    canvas.drawCircle(
+      const Offset(size / 2, size / 2),
+      size / 2 - 2,
+      Paint()
+        ..color = Colors.white
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 3,
+    );
+
+    // 絵文字
+    final tp = TextPainter(textDirection: TextDirection.ltr)
+      ..text = TextSpan(text: emoji, style: const TextStyle(fontSize: 36))
+      ..layout();
+    tp.paint(canvas, Offset((size - tp.width) / 2, (size - tp.height) / 2));
+
+    final picture = recorder.endRecording();
+    final image = await picture.toImage(size.toInt(), size.toInt());
+    final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
+    final descriptor = BitmapDescriptor.bytes(bytes!.buffer.asUint8List());
+    _markerCache[key] = descriptor;
+    return descriptor;
+  }
+
+  Future<void> _rebuildMarkers() async {
     // メンバーマーカーを再構築（警告マーカーを含む全マーカーを同期）
     final newMarkers = <Marker>{};
 
     // メンバーマーカー
-    _members.forEach((uid, val) {
-      final m = val as Map;
+    for (final entry in _members.entries) {
+      final uid = entry.key;
+      final m = entry.value as Map;
       final lat = (m['lat'] as num).toDouble();
       final lng = (m['lng'] as num).toDouble();
       final nick = m['nickname'] as String? ?? '';
+      final vehicleType = m['vehicle_type'] as String? ?? 'car';
       final isMe = uid == widget.userId;
+      final icon = await _getVehicleMarker(vehicleType, isMe);
       newMarkers.add(Marker(
         markerId: MarkerId(uid),
         position: LatLng(lat, lng),
-        icon: isMe
-            ? BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueBlue)
-            : BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueOrange),
+        icon: icon,
         infoWindow: InfoWindow(title: nick),
       ));
-    });
+    }
 
     // 目的地マーカー
     if (_groupDestination != null) {
@@ -632,6 +680,7 @@ class _MainScreenState extends State<MainScreen> {
         'nickname': widget.nickname,
         'lat': pos.latitude,
         'lng': pos.longitude,
+        'vehicle_type': widget.vehicleType,
         'last_seen': DateTime.now().millisecondsSinceEpoch,
       });
       if (!mounted) return;

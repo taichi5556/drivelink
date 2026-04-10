@@ -29,9 +29,9 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
   late Animation<double> _pulseAnim;
   StreamSubscription? _linkSub;
   bool _consentLocation = false;
-  bool _consentDriving  = false;
+  String _vehicleType = 'car'; // 'car' or 'bike'
   int _selectedHours = 4;  // デフォルト4時間
-  bool get _allConsented => _consentLocation && _consentDriving;
+  bool get _allConsented => _consentLocation;
 
   @override
   void initState() {
@@ -97,12 +97,19 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
   Future<void> _loadNickname() async {
     final prefs = await SharedPreferences.getInstance();
     final saved = prefs.getString('nickname') ?? '';
-    if (saved.isNotEmpty) setState(() => _nicknameController.text = saved);
+    final savedVehicle = prefs.getString('vehicle_type') ?? 'car';
+    if (mounted) {
+      setState(() {
+        if (saved.isNotEmpty) _nicknameController.text = saved;
+        _vehicleType = savedVehicle;
+      });
+    }
   }
 
   Future<void> _saveNickname(String nickname) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('nickname', nickname);
+    await prefs.setString('vehicle_type', _vehicleType);
   }
 
   String _generateRoomCode() {
@@ -167,7 +174,7 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
         'nickname': nickname, 'lat': 35.6812, 'lng': 139.7671,
       });
       if (!mounted) return;
-      Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => MainScreen(nickname: nickname, roomCode: roomCode, userId: userId)));
+      Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => MainScreen(nickname: nickname, roomCode: roomCode, userId: userId, vehicleType: _vehicleType)));
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
@@ -186,7 +193,7 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
         await prefs2.setString('user_id', userId);
       }
     if (!mounted) return;
-    Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => MainScreen(nickname: nickname, roomCode: roomCode, userId: userId)));
+    Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => MainScreen(nickname: nickname, roomCode: roomCode, userId: userId, vehicleType: _vehicleType)));
   }
 
   void _shareRoomCode(String code) {
@@ -205,6 +212,76 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
     ));
   }
 
+
+  // ─── 車両選択 ─────────────────────────────────────────────
+  Widget _buildVehicleSelector() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: const Color(0xFF111827),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: const Color(0xFF1E3A5F), width: 1.5),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(children: [
+            const Icon(Icons.directions_car_rounded, color: Color(0xFF00D4FF), size: 16),
+            const SizedBox(width: 6),
+            Text(
+              _isJapanese ? '車両タイプ' : 'Vehicle Type',
+              style: const TextStyle(color: Color(0xFF6680AA), fontSize: 12, fontWeight: FontWeight.w600),
+            ),
+          ]),
+          const SizedBox(height: 10),
+          Row(children: [
+            Expanded(child: _buildVehicleBtn('car',  '🚗', _isJapanese ? '車' : 'Car')),
+            const SizedBox(width: 10),
+            Expanded(child: _buildVehicleBtn('bike', '🏍', _isJapanese ? 'バイク' : 'Bike')),
+          ]),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildVehicleBtn(String type, String emoji, String label) {
+    final selected = _vehicleType == type;
+    return GestureDetector(
+      onTap: () => setState(() => _vehicleType = type),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        padding: const EdgeInsets.symmetric(vertical: 10),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(12),
+          gradient: selected
+              ? const LinearGradient(colors: [Color(0xFF00D4FF), Color(0xFF0057FF)])
+              : null,
+          color: selected ? null : const Color(0xFF0D1B2A),
+          border: Border.all(
+            color: selected ? const Color(0xFF00D4FF) : const Color(0xFF1E3A5F),
+            width: selected ? 2 : 1,
+          ),
+          boxShadow: selected
+              ? [BoxShadow(color: const Color(0xFF00D4FF).withValues(alpha: 0.3), blurRadius: 10)]
+              : [],
+        ),
+        child: Column(
+          children: [
+            Text(emoji, style: const TextStyle(fontSize: 28)),
+            const SizedBox(height: 4),
+            Text(
+              label,
+              style: TextStyle(
+                color: selected ? Colors.white : const Color(0xFF6680AA),
+                fontSize: 13,
+                fontWeight: selected ? FontWeight.w700 : FontWeight.normal,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 
   // ─── 同意チェックセクション ───────────────────────────────
   Widget _buildConsentSection() {
@@ -234,29 +311,18 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
           icon: Icons.location_on_rounded,
           iconColor: const Color(0xFF00D4FF),
           text: _isJapanese
-              ? '位置情報と音声を共有します。同意しますか？'
-              : 'I agree to share my location and voice.',
+              ? '位置情報を共有します。同意しますか？'
+              : 'I agree to share my location.',
           value: _consentLocation,
           onChanged: (v) => setState(() => _consentLocation = v ?? false),
-        ),
-        const SizedBox(height: 6),
-        _buildConsentTile(
-          icon: Icons.car_crash_rounded,
-          iconColor: const Color(0xFFFF6B35),
-          text: _isJapanese
-              ? '運転者は運転中に使用してはいけません。'
-              : 'Drivers must not use this app while driving.',
-          value: _consentDriving,
-          onChanged: (v) => setState(() => _consentDriving = v ?? false),
-          isWarning: true,
         ),
         if (!_allConsented) ...[
           const SizedBox(height: 8),
           Center(
             child: Text(
               _isJapanese
-                  ? '両方にチェックを入れると開始できます'
-                  : 'Check both boxes to continue',
+                  ? 'チェックを入れると開始できます'
+                  : 'Check the box to continue',
               style: const TextStyle(
                 color: Color(0xFF3A5070),
                 fontSize: 11,
@@ -449,6 +515,8 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
             Text(_subtitle, style: const TextStyle(fontSize: 12, color: Color(0xFF6680AA), letterSpacing: 0.5)),
             const SizedBox(height: 8),
             _buildTextField(_nicknameController, _nickLabel, Icons.person_outline_rounded),
+            const SizedBox(height: 8),
+            _buildVehicleSelector(),
             const SizedBox(height: 8),
             _buildConsentSection(),
             const SizedBox(height: 8),
