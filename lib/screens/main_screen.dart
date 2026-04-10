@@ -95,7 +95,7 @@ class _MainScreenState extends State<MainScreen> {
     await Permission.locationWhenInUse.request();
     await _updateLocation();
     _locationTimer = Timer.periodic(
-      const Duration(seconds: 5),
+      const Duration(seconds: 2),
       (_) => _updateLocation(),
     );
     _listenToMembers();
