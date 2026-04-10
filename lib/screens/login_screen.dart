@@ -285,6 +285,22 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
   }
 
   // ─── ナビ案内 ─────────────────────────────────────────────
+  Widget _buildInfoRow(String text) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Icon(Icons.info_outline_rounded, color: Color(0xFF4CAF50), size: 16),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Text(
+            text,
+            style: const TextStyle(color: Color(0xFF81C784), fontSize: 12, height: 1.5),
+          ),
+        ),
+      ],
+    );
+  }
+
   Widget _buildNaviInfoCard() {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
@@ -293,22 +309,19 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
         borderRadius: BorderRadius.circular(14),
         border: Border.all(color: const Color(0xFF1A4A1A), width: 1.5),
       ),
-      child: Row(
+      child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Icon(Icons.info_outline_rounded, color: Color(0xFF4CAF50), size: 18),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Text(
-              _isJapanese
-                  ? 'ナビの音声はGoogleマップなど別アプリをバックグラウンドで使用してください'
-                  : 'Use a separate app (e.g. Google Maps) in the background for voice navigation.',
-              style: const TextStyle(
-                color: Color(0xFF81C784),
-                fontSize: 12,
-                height: 1.5,
-              ),
-            ),
+          _buildInfoRow(
+            _isJapanese
+                ? 'ナビの音声はGoogleマップなど別アプリをバックグラウンドで使用してください'
+                : 'Use a separate app (e.g. Google Maps) in the background for voice navigation.',
+          ),
+          const SizedBox(height: 8),
+          _buildInfoRow(
+            _isJapanese
+                ? 'バックグラウンド10分で位置情報の共有が自動停止されます。復帰すると再開されます。'
+                : 'Location sharing stops automatically after 10 minutes in the background and resumes when you return.',
           ),
         ],
       ),
