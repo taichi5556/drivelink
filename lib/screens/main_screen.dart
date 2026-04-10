@@ -59,6 +59,11 @@ class _MainScreenState extends State<MainScreen> {
   LatLng? get _activeDestination => _groupDestination;
   String get _activeDestName => _groupDestName;
 
+  // ルート逸脱自動再検索
+  DateTime? _lastRerouteTime;
+  static const _rerouteThresholdMeters = 80.0;  // 逸脱判定距離
+  static const _rerouteCooldownSecs    = 60;     // 再検索間隔（秒）
+
   // 警告ポイント関連
   Map<String, dynamic> _warnings = {};
   StreamSubscription? _warningsSubscription;
@@ -746,11 +751,79 @@ class _MainScreenState extends State<MainScreen> {
           programmatic: true,
         );
       }
+      // ルート逸脱チェック
+      _checkRouteDeviation();
     } catch (e) {
       debugPrint('位置情報エラー: $e');
     } finally {
       _updateLocationInProgress = false;
     }
+  }
+
+  void _checkRouteDeviation() {
+    if (_polylines.isEmpty || _groupDestination == null) return;
+
+    // クールダウン中はスキップ
+    final now = DateTime.now();
+    if (_lastRerouteTime != null &&
+        now.difference(_lastRerouteTime!).inSeconds < _rerouteCooldownSecs) return;
+
+    // ポリラインの全点を抽出
+    final points = _polylines.first.points;
+    if (points.isEmpty) return;
+
+    final dist = _distanceToPolyline(_myPosition, points);
+    if (dist > _rerouteThresholdMeters) {
+      _lastRerouteTime = now;
+      debugPrint('ルート逸脱検知: ${dist.toStringAsFixed(0)}m → 再検索');
+      _fetchRoute(_groupDestination!);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('📍 ルートを外れたため再検索しています...'),
+            backgroundColor: Color(0xFF1A3A5C),
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
+    }
+  }
+
+  /// 現在地からポリライン（各線分）までの最短距離（メートル）を返す
+  double _distanceToPolyline(LatLng point, List<LatLng> polylinePoints) {
+    if (polylinePoints.length == 1) return _metersTo(point, polylinePoints[0]);
+    double minDist = double.infinity;
+    for (int i = 0; i < polylinePoints.length - 1; i++) {
+      final d = _distanceToSegment(point, polylinePoints[i], polylinePoints[i + 1]);
+      if (d < minDist) minDist = d;
+    }
+    return minDist;
+  }
+
+  /// 点 p から線分 a-b までの最短距離（メートル）
+  double _distanceToSegment(LatLng p, LatLng a, LatLng b) {
+    final cosLat = cos(p.latitude * pi / 180);
+    // 局所平面座標に変換（メートル）
+    final px = (p.longitude - a.longitude) * cosLat * 111320;
+    final py = (p.latitude  - a.latitude)           * 111320;
+    final dx = (b.longitude - a.longitude) * cosLat * 111320;
+    final dy = (b.latitude  - a.latitude)           * 111320;
+    final lenSq = dx * dx + dy * dy;
+    if (lenSq == 0) return sqrt(px * px + py * py);
+    final t = ((px * dx + py * dy) / lenSq).clamp(0.0, 1.0);
+    return sqrt(pow(px - t * dx, 2) + pow(py - t * dy, 2));
+  }
+
+  /// 2点間の距離（メートル）
+  double _metersTo(LatLng a, LatLng b) {
+    const r = 6371000.0;
+    final dLat = (b.latitude  - a.latitude)  * pi / 180;
+    final dLng = (b.longitude - a.longitude) * pi / 180;
+    final sinLat = sin(dLat / 2);
+    final sinLng = sin(dLng / 2);
+    final h = sinLat * sinLat +
+        cos(a.latitude * pi / 180) * cos(b.latitude * pi / 180) * sinLng * sinLng;
+    return r * 2 * atan2(sqrt(h), sqrt(1 - h));
   }
 
   void _animateCamera(CameraUpdate update, {required bool programmatic}) {
@@ -1040,22 +1113,6 @@ class _MainScreenState extends State<MainScreen> {
               }
             },
           ),
-          if (_groupDestination != null)
-            _buildActionBtn(
-              icon: Icons.refresh_rounded,
-              label: 'ルート\n再検索',
-              color: const Color(0xFF1B5E20),
-              onTap: () {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                    content: Text('ルートを再検索中...'),
-                    backgroundColor: Color(0xFF1A3A5C),
-                    duration: Duration(seconds: 1),
-                  ),
-                );
-                _fetchRoute(_groupDestination!);
-              },
-            ),
         ],
       ),
     );
