@@ -55,6 +55,19 @@ class _MainScreenState extends State<MainScreen> {
   LatLng? get _activeDestination => _groupDestination;
   String get _activeDestName => _groupDestName;
 
+  // 警告ポイント関連
+  Map<String, dynamic> _warnings = {};
+  StreamSubscription? _warningsSubscription;
+  Timer? _warningCleanupTimer;
+
+  static const _warningTypes = [
+    {'key': 'speed_camera', 'label': '取り締まり', 'emoji': '🚨', 'hue': BitmapDescriptor.hueRed},
+    {'key': 'caution',      'label': '注意',       'emoji': '⚠️', 'hue': BitmapDescriptor.hueYellow},
+    {'key': 'accident',     'label': '事故',       'emoji': '🚗', 'hue': BitmapDescriptor.hueOrange},
+    {'key': 'construction', 'label': '工事',       'emoji': '🚧', 'hue': BitmapDescriptor.hueViolet},
+    {'key': 'congestion',   'label': '渋滞',       'emoji': '🐌', 'hue': BitmapDescriptor.hueCyan},
+  ];
+
   // AdMob
   BannerAd? _bannerAd;
   bool _isBannerAdLoaded = false;
@@ -82,8 +95,14 @@ class _MainScreenState extends State<MainScreen> {
     );
     _listenToMembers();
     _listenToDestination();
+    _listenToWarnings();
     _initAppLinks();
     _startExpiryCheck();
+    // 期限切れ警告ポイントを1分ごとに削除
+    _warningCleanupTimer = Timer.periodic(
+      const Duration(minutes: 1),
+      (_) => _cleanupExpiredWarnings(),
+    );
   }
 
   void _loadBannerAd() {
@@ -270,23 +289,213 @@ class _MainScreenState extends State<MainScreen> {
     });
   }
 
+  // ── 警告ポイント ──────────────────────────────────────────────
+
+  void _listenToWarnings() {
+    _warningsSubscription = _db
+        .child('rooms/${widget.roomCode}/warnings')
+        .onValue
+        .listen((event) {
+      final data = event.snapshot.value as Map?;
+      if (!mounted) return;
+      if (data == null) {
+        setState(() => _warnings = {});
+        _rebuildMarkers();
+        return;
+      }
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final updated = <String, dynamic>{};
+      data.forEach((k, v) {
+        final w = v as Map;
+        final expiresAt = (w['expires_at'] as num?)?.toInt() ?? 0;
+        if (expiresAt > now) updated[k.toString()] = v;
+      });
+      setState(() => _warnings = updated);
+      _rebuildMarkers();
+    });
+  }
+
+  Future<void> _addWarning(LatLng position, String typeKey) async {
+    final type = _warningTypes.firstWhere((t) => t['key'] == typeKey);
+    final id = _db.child('rooms/${widget.roomCode}/warnings').push().key!;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    await _db.child('rooms/${widget.roomCode}/warnings/$id').set({
+      'type': typeKey,
+      'label': type['label'],
+      'emoji': type['emoji'],
+      'lat': position.latitude,
+      'lng': position.longitude,
+      'senderUid': widget.userId,
+      'senderNick': widget.nickname,
+      'created_at': now,
+      'expires_at': now + 30 * 60 * 1000, // 30分後に期限切れ
+    });
+  }
+
+  Future<void> _cleanupExpiredWarnings() async {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final snapshot = await _db.child('rooms/${widget.roomCode}/warnings').get();
+    final data = snapshot.value as Map?;
+    if (data == null) return;
+    final updates = <String, dynamic>{};
+    data.forEach((k, v) {
+      final w = v as Map;
+      final expiresAt = (w['expires_at'] as num?)?.toInt() ?? 0;
+      if (expiresAt <= now) updates['$k'] = null;
+    });
+    if (updates.isNotEmpty) {
+      await _db.child('rooms/${widget.roomCode}/warnings').update(updates);
+    }
+  }
+
+  void _rebuildMarkers() {
+    // メンバーマーカーを再構築（警告マーカーを含む全マーカーを同期）
+    final newMarkers = <Marker>{};
+
+    // メンバーマーカー
+    _members.forEach((uid, val) {
+      final m = val as Map;
+      final lat = (m['lat'] as num).toDouble();
+      final lng = (m['lng'] as num).toDouble();
+      final nick = m['nickname'] as String? ?? '';
+      final isMe = uid == widget.userId;
+      newMarkers.add(Marker(
+        markerId: MarkerId(uid),
+        position: LatLng(lat, lng),
+        icon: isMe
+            ? BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueBlue)
+            : BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueOrange),
+        infoWindow: InfoWindow(title: nick),
+      ));
+    });
+
+    // 目的地マーカー
+    if (_groupDestination != null) {
+      newMarkers.add(Marker(
+        markerId: const MarkerId('destination'),
+        position: _groupDestination!,
+        icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueBlue),
+        infoWindow: InfoWindow(title: _groupDestName),
+      ));
+    }
+
+    // 警告マーカー
+    _warnings.forEach((id, val) {
+      final w = val as Map;
+      final lat = (w['lat'] as num).toDouble();
+      final lng = (w['lng'] as num).toDouble();
+      final label = w['label'] as String? ?? '警告';
+      final emoji = w['emoji'] as String? ?? '⚠️';
+      final nick = w['senderNick'] as String? ?? '';
+      final type = _warningTypes.firstWhere(
+        (t) => t['key'] == w['type'],
+        orElse: () => _warningTypes[1],
+      );
+      final hue = (type['hue'] as double?) ?? BitmapDescriptor.hueYellow;
+      newMarkers.add(Marker(
+        markerId: MarkerId('warning_$id'),
+        position: LatLng(lat, lng),
+        icon: BitmapDescriptor.defaultMarkerWithHue(hue),
+        infoWindow: InfoWindow(
+          title: '$emoji $label',
+          snippet: '$nickが報告',
+        ),
+      ));
+    });
+
+    setState(() => _markers = newMarkers);
+  }
+
+  Future<void> _showAddWarningDialog(LatLng position) async {
+    String? selectedType;
+    await showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setStateDialog) => AlertDialog(
+          backgroundColor: const Color(0xFF0D1B2A),
+          title: const Text('⚠️ 警告を報告', style: TextStyle(color: Colors.white)),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: _warningTypes.map((type) {
+              final isSelected = selectedType == type['key'];
+              return GestureDetector(
+                onTap: () => setStateDialog(() => selectedType = type['key'] as String),
+                child: Container(
+                  margin: const EdgeInsets.symmetric(vertical: 4),
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: isSelected
+                        ? const Color(0xFF1E3A5F)
+                        : const Color(0xFF152030),
+                    border: Border.all(
+                      color: isSelected ? const Color(0xFF00D4FF) : Colors.transparent,
+                      width: 1.5,
+                    ),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Row(
+                    children: [
+                      Text(type['emoji'] as String, style: const TextStyle(fontSize: 20)),
+                      const SizedBox(width: 12),
+                      Text(
+                        type['label'] as String,
+                        style: const TextStyle(color: Colors.white, fontSize: 15),
+                      ),
+                      if (isSelected) ...[
+                        const Spacer(),
+                        const Icon(Icons.check_circle, color: Color(0xFF00D4FF), size: 18),
+                      ],
+                    ],
+                  ),
+                ),
+              );
+            }).toList(),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('キャンセル', style: TextStyle(color: Colors.grey)),
+            ),
+            TextButton(
+              onPressed: selectedType == null
+                  ? null
+                  : () async {
+                      Navigator.pop(ctx);
+                      await _addWarning(position, selectedType!);
+                      if (mounted) {
+                        final type = _warningTypes.firstWhere((t) => t['key'] == selectedType);
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text('${type['emoji']} 「${type['label']}」を報告しました（30分間表示）'),
+                            backgroundColor: const Color(0xFF1A3A5C),
+                          ),
+                        );
+                      }
+                    },
+              child: Text(
+                '報告する',
+                style: TextStyle(
+                  color: selectedType != null ? const Color(0xFFFF6B35) : Colors.grey,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ── ここまで警告ポイント ───────────────────────────────────────
+
   void _updateDestinationMarker() {
     final dest = _activeDestination;
-    final name = _activeDestName;
-    setState(() {
-      _markers.removeWhere((m) => m.markerId.value == 'destination');
-      if (dest != null) {
-        _markers.add(Marker(
-          markerId: const MarkerId('destination'),
-          position: dest,
-          icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueBlue),
-          infoWindow: InfoWindow(title: name),
-        ));
-        _fetchRoute(dest);
-      } else {
-        setState(() => _polylines = {});
-      }
-    });
+    if (dest != null) {
+      _fetchRoute(dest);
+    } else {
+      setState(() => _polylines = {});
+    }
+    _rebuildMarkers();
   }
 
   Future<void> _fetchRoute(LatLng dest) async {
@@ -493,27 +702,9 @@ class _MainScreenState extends State<MainScreen> {
       if (data == null) return;
       final updated = <String, dynamic>{};
       data.forEach((k, v) => updated[k.toString()] = v);
-      final newMarkers = <Marker>{};
-      updated.forEach((uid, val) {
-        final m = val as Map;
-        final lat = (m['lat'] as num).toDouble();
-        final lng = (m['lng'] as num).toDouble();
-        final nick = m['nickname'] as String? ?? '';
-        final isMe = uid == widget.userId;
-        newMarkers.add(Marker(
-          markerId: MarkerId(uid),
-          position: LatLng(lat, lng),
-          icon: isMe
-              ? BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueBlue)
-              : BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueOrange),
-          infoWindow: InfoWindow(title: nick),
-        ));
-      });
       if (mounted) {
-        setState(() {
-          _members = updated;
-          _markers = newMarkers;
-        });
+        setState(() => _members = updated);
+        _rebuildMarkers();
       }
     });
   }
@@ -579,8 +770,10 @@ class _MainScreenState extends State<MainScreen> {
     _locationTimer?.cancel();
     _countdownTimer?.cancel();
     _expiryTimer?.cancel();
+    _warningCleanupTimer?.cancel();
     _membersSubscription?.cancel();
     _destSubscription?.cancel();
+    _warningsSubscription?.cancel();
     _appLinkSubscription?.cancel();
     _db.child('rooms/${widget.roomCode}/members/${widget.userId}').remove();
     _bannerAd?.dispose();
@@ -728,6 +921,7 @@ class _MainScreenState extends State<MainScreen> {
         myLocationEnabled: false,
         myLocationButtonEnabled: false,
         zoomControlsEnabled: false,
+        onLongPress: (latLng) => _showAddWarningDialog(latLng),
       ),
     );
   }
@@ -810,6 +1004,12 @@ class _MainScreenState extends State<MainScreen> {
                 ? const Color(0xFF00D4FF)
                 : Colors.grey.shade800,
             onTap: _groupDestination != null ? _shareGroupDestination : null,
+          ),
+          _buildActionBtn(
+            icon: Icons.warning_amber_rounded,
+            label: '警告報告',
+            color: const Color(0xFFB71C1C),
+            onTap: () => _showAddWarningDialog(_myPosition),
           ),
         ],
       ),
