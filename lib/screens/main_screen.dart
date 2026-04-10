@@ -775,7 +775,7 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
       if (mounted) setState(() { _isRecording = true; _recordSeconds = 0; });
       _recordTimer = Timer.periodic(const Duration(seconds: 1), (_) {
         setState(() => _recordSeconds++);
-        if (_recordSeconds >= 30) _stopRecording();
+        if (_recordSeconds >= 20) _stopRecording();
       });
       debugPrint('Agora録音開始');
     } catch (e) {
@@ -785,6 +785,10 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
   }
 
   Future<void> _stopRecording() async {
+    // 送信バイブレーション（2回目タップ）
+    if (await Vibration.hasVibrator() ?? false) {
+      Vibration.vibrate(duration: 100);
+    }
     // マイクトラックを無効化
     if (_agoraJoined) {
       try {
@@ -1127,11 +1131,13 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
               Expanded(
                 child:
           GestureDetector(
-            onTapDown: _voiceMode == 'drive' ? null : (_) async {
-              await _agoraEngine?.muteLocalAudioStream(false);
+            onTap: (_voiceMode == 'drive' || _isOtherRecording) ? null : () {
+              if (_isRecording) {
+                _stopRecording();
+              } else {
+                _startRecording();
+              }
             },
-            onLongPressStart: (_voiceMode == 'drive' || _isOtherRecording) ? null : (_) => _startRecording(),
-            onLongPressEnd: (_voiceMode == 'drive' || _isOtherRecording) ? null : (_) => _stopRecording(),
             child: AnimatedBuilder(
               animation: _pulseController,
               builder: (_, __) => Container(
@@ -1172,8 +1178,8 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
                           : _isOtherRecording
                               ? '録音中(他ユーザー)'
                               : _isRecording
-                                  ? '送信中...'
-                                  : '押してる間、全員へ送信',
+                                  ? 'タップして送信'
+                                  : 'タップして録音',
                       style: TextStyle(
                         color: _voiceMode == 'drive' ? Colors.white54 : Colors.white,
                         fontSize: _voiceMode == 'drive' ? 15 : 18,
