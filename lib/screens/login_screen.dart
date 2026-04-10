@@ -284,6 +284,37 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
     );
   }
 
+  // ─── ナビ案内 ─────────────────────────────────────────────
+  Widget _buildNaviInfoCard() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: const Color(0xFF0D1A0D),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: const Color(0xFF1A4A1A), width: 1.5),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Icon(Icons.info_outline_rounded, color: Color(0xFF4CAF50), size: 18),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              _isJapanese
+                  ? 'ナビの音声はGoogleマップなど別アプリをバックグラウンドで使用してください'
+                  : 'Use a separate app (e.g. Google Maps) in the background for voice navigation.',
+              style: const TextStyle(
+                color: Color(0xFF81C784),
+                fontSize: 12,
+                height: 1.5,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   // ─── 同意チェックセクション ───────────────────────────────
   Widget _buildConsentSection() {
     return Column(
@@ -529,6 +560,8 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
             _buildTextField(_nicknameController, _nickLabel, Icons.person_outline_rounded),
             const SizedBox(height: 8),
             _buildVehicleSelector(),
+            const SizedBox(height: 8),
+            _buildNaviInfoCard(),
             const SizedBox(height: 8),
             _buildConsentSection(),
             const SizedBox(height: 8),

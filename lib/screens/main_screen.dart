@@ -12,6 +12,7 @@ import 'package:firebase_database/firebase_database.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:google_mobile_ads/google_mobile_ads.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'login_screen.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:app_links/app_links.dart';
@@ -496,11 +497,51 @@ class _MainScreenState extends State<MainScreen> {
     }
   }
 
+  // ── 目的地履歴 ───────────────────────────────────────────────
+  static const _historyKey = 'dest_history';
+  static const _historyMax = 3;
+
+  Future<List<Map<String, dynamic>>> _loadDestHistory() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(_historyKey);
+    if (raw == null) return [];
+    try {
+      return List<Map<String, dynamic>>.from(
+        (jsonDecode(raw) as List).map((e) => Map<String, dynamic>.from(e as Map)),
+      );
+    } catch (_) {
+      return [];
+    }
+  }
+
+  Future<void> _saveDestHistory(String name, double lat, double lng) async {
+    final prefs = await SharedPreferences.getInstance();
+    final history = await _loadDestHistory();
+    // 同名の重複を除去してから先頭に追加
+    history.removeWhere((e) => e['name'] == name);
+    history.insert(0, {'name': name, 'lat': lat, 'lng': lng});
+    if (history.length > _historyMax) history.removeRange(_historyMax, history.length);
+    await prefs.setString(_historyKey, jsonEncode(history));
+  }
+
+  // ── ここまで目的地履歴 ────────────────────────────────────────
+
   Future<void> _setPersonalDestination() async {
     final TextEditingController searchCtrl = TextEditingController();
     List<Map<String, dynamic>> searchResults = [];
+    List<Map<String, dynamic>> history = await _loadDestHistory();
     bool isSearching = false;
     const placesApiKey = 'AIzaSyChuUZypiVhojgCO6ZgZML-ZW3eYLtti5c';
+
+    void selectDest(BuildContext ctx, String name, double lat, double lng) {
+      setState(() {
+        _groupDestination = LatLng(lat, lng);
+        _groupDestName = name;
+      });
+      _updateDestinationMarker();
+      _saveDestHistory(name, lat, lng);
+      Navigator.pop(ctx);
+    }
 
     await showDialog(
       context: context,
@@ -564,7 +605,24 @@ class _MainScreenState extends State<MainScreen> {
                     }
                   },
                 ),
-                const SizedBox(height: 8),
+                // 履歴（検索結果がないときだけ表示）
+                if (searchResults.isEmpty && history.isNotEmpty) ...[
+                  const SizedBox(height: 10),
+                  Row(children: [
+                    const Icon(Icons.history, color: Colors.grey, size: 14),
+                    const SizedBox(width: 4),
+                    const Text('最近の目的地', style: TextStyle(color: Colors.grey, fontSize: 11)),
+                  ]),
+                  const SizedBox(height: 4),
+                  ...history.map((h) => ListTile(
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.history, color: Color(0xFF6680AA), size: 18),
+                    title: Text(h['name'] as String, style: const TextStyle(color: Colors.white70, fontSize: 13)),
+                    onTap: () => selectDest(ctx, h['name'] as String, h['lat'] as double, h['lng'] as double),
+                  )),
+                ],
+                const SizedBox(height: 4),
                 if (searchResults.isNotEmpty)
                   ConstrainedBox(
                     constraints: const BoxConstraints(maxHeight: 250),
@@ -577,14 +635,7 @@ class _MainScreenState extends State<MainScreen> {
                           leading: const Icon(Icons.place, color: Color(0xFF00D4FF)),
                           title: Text(r['name'], style: const TextStyle(color: Colors.white, fontSize: 14)),
                           subtitle: Text(r['address'], style: const TextStyle(color: Colors.grey, fontSize: 11), maxLines: 1, overflow: TextOverflow.ellipsis),
-                          onTap: () async {
-                            setState(() {
-                              _groupDestination = LatLng(r['lat'], r['lng']);
-                              _groupDestName = r['name'];
-                            });
-                            _updateDestinationMarker();
-                            Navigator.pop(ctx);
-                          },
+                          onTap: () => selectDest(ctx, r['name'] as String, r['lat'] as double, r['lng'] as double),
                         );
                       },
                     ),
@@ -989,6 +1040,22 @@ class _MainScreenState extends State<MainScreen> {
               }
             },
           ),
+          if (_groupDestination != null)
+            _buildActionBtn(
+              icon: Icons.refresh_rounded,
+              label: 'ルート\n再検索',
+              color: const Color(0xFF1B5E20),
+              onTap: () {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('ルートを再検索中...'),
+                    backgroundColor: Color(0xFF1A3A5C),
+                    duration: Duration(seconds: 1),
+                  ),
+                );
+                _fetchRoute(_groupDestination!);
+              },
+            ),
         ],
       ),
     );
@@ -1013,7 +1080,7 @@ class _MainScreenState extends State<MainScreen> {
           children: [
             Icon(icon, color: Colors.white, size: 22),
             const SizedBox(height: 2),
-            Text(label, style: const TextStyle(color: Colors.white, fontSize: 10)),
+            Text(label, textAlign: TextAlign.center, style: const TextStyle(color: Colors.white, fontSize: 10)),
           ],
         ),
       ),
