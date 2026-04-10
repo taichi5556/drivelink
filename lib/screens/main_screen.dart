@@ -60,13 +60,6 @@ class _MainScreenState extends State<MainScreen> {
   StreamSubscription? _warningsSubscription;
   Timer? _warningCleanupTimer;
 
-  static const _warningTypes = [
-    {'key': 'speed_camera', 'label': '取り締まり', 'emoji': '🚨', 'hue': BitmapDescriptor.hueRed},
-    {'key': 'caution',      'label': '注意',       'emoji': '⚠️', 'hue': BitmapDescriptor.hueYellow},
-    {'key': 'accident',     'label': '事故',       'emoji': '🚗', 'hue': BitmapDescriptor.hueOrange},
-    {'key': 'construction', 'label': '工事',       'emoji': '🚧', 'hue': BitmapDescriptor.hueViolet},
-    {'key': 'congestion',   'label': '渋滞',       'emoji': '🐌', 'hue': BitmapDescriptor.hueCyan},
-  ];
 
   // AdMob
   BannerAd? _bannerAd;
@@ -315,20 +308,16 @@ class _MainScreenState extends State<MainScreen> {
     });
   }
 
-  Future<void> _addWarning(LatLng position, String typeKey) async {
-    final type = _warningTypes.firstWhere((t) => t['key'] == typeKey);
+  Future<void> _addWarning(LatLng position) async {
     final id = _db.child('rooms/${widget.roomCode}/warnings').push().key!;
     final now = DateTime.now().millisecondsSinceEpoch;
     await _db.child('rooms/${widget.roomCode}/warnings/$id').set({
-      'type': typeKey,
-      'label': type['label'],
-      'emoji': type['emoji'],
       'lat': position.latitude,
       'lng': position.longitude,
       'senderUid': widget.userId,
       'senderNick': widget.nickname,
       'created_at': now,
-      'expires_at': now + 30 * 60 * 1000, // 30分後に期限切れ
+      'expires_at': now + 30 * 60 * 1000,
     });
   }
 
@@ -384,106 +373,19 @@ class _MainScreenState extends State<MainScreen> {
       final w = val as Map;
       final lat = (w['lat'] as num).toDouble();
       final lng = (w['lng'] as num).toDouble();
-      final label = w['label'] as String? ?? '警告';
-      final emoji = w['emoji'] as String? ?? '⚠️';
       final nick = w['senderNick'] as String? ?? '';
-      final type = _warningTypes.firstWhere(
-        (t) => t['key'] == w['type'],
-        orElse: () => _warningTypes[1],
-      );
-      final hue = (type['hue'] as double?) ?? BitmapDescriptor.hueYellow;
       newMarkers.add(Marker(
         markerId: MarkerId('warning_$id'),
         position: LatLng(lat, lng),
-        icon: BitmapDescriptor.defaultMarkerWithHue(hue),
+        icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRed),
         infoWindow: InfoWindow(
-          title: '$emoji $label',
+          title: '！ 注意喚起',
           snippet: '$nickが報告',
         ),
       ));
     });
 
     setState(() => _markers = newMarkers);
-  }
-
-  Future<void> _showAddWarningDialog(LatLng position) async {
-    String? selectedType;
-    await showDialog(
-      context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setStateDialog) => AlertDialog(
-          backgroundColor: const Color(0xFF0D1B2A),
-          title: const Text('⚠️ 警告を報告', style: TextStyle(color: Colors.white)),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: _warningTypes.map((type) {
-              final isSelected = selectedType == type['key'];
-              return GestureDetector(
-                onTap: () => setStateDialog(() => selectedType = type['key'] as String),
-                child: Container(
-                  margin: const EdgeInsets.symmetric(vertical: 4),
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-                  decoration: BoxDecoration(
-                    color: isSelected
-                        ? const Color(0xFF1E3A5F)
-                        : const Color(0xFF152030),
-                    border: Border.all(
-                      color: isSelected ? const Color(0xFF00D4FF) : Colors.transparent,
-                      width: 1.5,
-                    ),
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: Row(
-                    children: [
-                      Text(type['emoji'] as String, style: const TextStyle(fontSize: 20)),
-                      const SizedBox(width: 12),
-                      Text(
-                        type['label'] as String,
-                        style: const TextStyle(color: Colors.white, fontSize: 15),
-                      ),
-                      if (isSelected) ...[
-                        const Spacer(),
-                        const Icon(Icons.check_circle, color: Color(0xFF00D4FF), size: 18),
-                      ],
-                    ],
-                  ),
-                ),
-              );
-            }).toList(),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text('キャンセル', style: TextStyle(color: Colors.grey)),
-            ),
-            TextButton(
-              onPressed: selectedType == null
-                  ? null
-                  : () async {
-                      Navigator.pop(ctx);
-                      await _addWarning(position, selectedType!);
-                      if (mounted) {
-                        final type = _warningTypes.firstWhere((t) => t['key'] == selectedType);
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(
-                            content: Text('${type['emoji']} 「${type['label']}」を報告しました（30分間表示）'),
-                            backgroundColor: const Color(0xFF1A3A5C),
-                          ),
-                        );
-                      }
-                    },
-              child: Text(
-                '報告する',
-                style: TextStyle(
-                  color: selectedType != null ? const Color(0xFFFF6B35) : Colors.grey,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
   }
 
   // ── ここまで警告ポイント ───────────────────────────────────────
@@ -921,7 +823,17 @@ class _MainScreenState extends State<MainScreen> {
         myLocationEnabled: false,
         myLocationButtonEnabled: false,
         zoomControlsEnabled: false,
-        onLongPress: (latLng) => _showAddWarningDialog(latLng),
+        onLongPress: (latLng) async {
+          await _addWarning(latLng);
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('！ 注意喚起を報告しました（30分間表示）'),
+                backgroundColor: Color(0xFF1A3A5C),
+              ),
+            );
+          }
+        },
       ),
     );
   }
@@ -966,8 +878,10 @@ class _MainScreenState extends State<MainScreen> {
   Widget _buildActionButtons() {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+      child: Wrap(
+        alignment: WrapAlignment.center,
+        spacing: 8,
+        runSpacing: 6,
         children: [
           _buildActionBtn(
             icon: _polylines.isNotEmpty ? Icons.stop : Icons.place,
@@ -1007,9 +921,19 @@ class _MainScreenState extends State<MainScreen> {
           ),
           _buildActionBtn(
             icon: Icons.warning_amber_rounded,
-            label: '警告報告',
+            label: '注意喚起',
             color: const Color(0xFFB71C1C),
-            onTap: () => _showAddWarningDialog(_myPosition),
+            onTap: () async {
+              await _addWarning(_myPosition);
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('！ 注意喚起を報告しました（30分間表示）'),
+                    backgroundColor: Color(0xFF1A3A5C),
+                  ),
+                );
+              }
+            },
           ),
         ],
       ),
