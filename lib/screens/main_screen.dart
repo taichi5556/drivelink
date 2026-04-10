@@ -159,19 +159,10 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
     }
   }
 
-  // 通話モード切替時: audienceからbroadcasterへロール変更
+  // 通話モード切替時: audienceのまま待機（broadcasterへの切替はPTT押下時のみ）
+  // → _joinAgoraChannel()ではAgoraのロールを変更しない（BT5.0 HFP起動防止）
   Future<void> _joinAgoraChannel() async {
-    try {
-      await _agoraEngine?.updateChannelMediaOptions(const ChannelMediaOptions(
-        channelProfile: ChannelProfileType.channelProfileCommunication,
-        clientRoleType: ClientRoleType.clientRoleBroadcaster,
-        publishMicrophoneTrack: false,
-        autoSubscribeAudio: true,
-      ));
-      debugPrint('Agora通話モード（broadcaster）切替: ${widget.roomCode}');
-    } catch (e) {
-      debugPrint('Agora参加エラー: $e');
-    }
+    debugPrint('Agora通話モード待機（audienceのまま）');
   }
 
   // ドライブモード切替時: broadcasterからaudienceへロール変更（チャンネルは継続参加）
@@ -278,17 +269,6 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
       final isNowReceiving = val != null && val != widget.userId;
       if (!wasReceiving && isNowReceiving) {
         await _agoraEngine?.setDefaultAudioRouteToSpeakerphone(true);
-      } else if (wasReceiving && !isNowReceiving && _voiceMode == 'talk') {
-        // 受信終了（通話モードのみ）→ 送信準備
-        try {
-          await _agoraEngine?.updateChannelMediaOptions(const ChannelMediaOptions(
-            publishMicrophoneTrack: false,
-            clientRoleType: ClientRoleType.clientRoleBroadcaster,
-          ));
-          await _agoraEngine?.muteLocalAudioStream(true);
-        } catch (e) {
-          debugPrint('受信終了処理エラー: $e');
-        }
       }
       if (mounted) {
         setState(() {
@@ -789,12 +769,13 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
     if (await Vibration.hasVibrator() ?? false) {
       Vibration.vibrate(duration: 100);
     }
-    // マイクトラックを無効化
+    // マイクトラックを無効化してaudienceへ戻す（HFP解除）
     if (_agoraJoined) {
       try {
         await _agoraEngine?.updateChannelMediaOptions(const ChannelMediaOptions(
           publishMicrophoneTrack: false,
-          clientRoleType: ClientRoleType.clientRoleBroadcaster,
+          clientRoleType: ClientRoleType.clientRoleAudience,
+          autoSubscribeAudio: true,
         ));
       } catch (e) {
         debugPrint('stopRecording Agora error: $e');
