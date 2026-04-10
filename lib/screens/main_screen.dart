@@ -112,7 +112,9 @@ class _MainScreenState extends State<MainScreen> {
 
   void _loadBannerAd() {
     _bannerAd = BannerAd(
-      adUnitId: 'ca-app-pub-3940256099942544/6300978111',
+      adUnitId: Platform.isIOS
+          ? 'ca-app-pub-4544332023567609/6687240610'
+          : 'ca-app-pub-4544332023567609/4801658317',
       size: AdSize.banner,
       request: const AdRequest(),
       listener: BannerAdListener(
