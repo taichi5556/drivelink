@@ -1068,14 +1068,59 @@ class _MainScreenState extends State<MainScreen> {
         myLocationButtonEnabled: false,
         zoomControlsEnabled: false,
         onLongPress: (latLng) async {
-          await _addWarning(latLng);
-          if (mounted) {
+          final result = await showDialog<String>(
+            context: context,
+            builder: (ctx) => AlertDialog(
+              backgroundColor: const Color(0xFF0D1B2A),
+              title: const Text('この地点をどうしますか？', style: TextStyle(color: Colors.white, fontSize: 16)),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  ListTile(
+                    leading: const Icon(Icons.place, color: Color(0xFF00D4FF)),
+                    title: const Text('目的地に設定', style: TextStyle(color: Colors.white)),
+                    onTap: () => Navigator.pop(ctx, 'destination'),
+                  ),
+                  ListTile(
+                    leading: const Icon(Icons.warning_amber_rounded, color: Colors.orangeAccent),
+                    title: const Text('注意喚起を報告', style: TextStyle(color: Colors.white)),
+                    onTap: () => Navigator.pop(ctx, 'warning'),
+                  ),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('キャンセル', style: TextStyle(color: Colors.grey)),
+                ),
+              ],
+            ),
+          );
+          if (!mounted) return;
+          if (result == 'destination') {
+            const name = 'マップで選択した地点';
+            setState(() {
+              _groupDestination = latLng;
+              _groupDestName = name;
+            });
+            _updateDestinationMarker();
+            _saveDestHistory(name, latLng.latitude, latLng.longitude);
             ScaffoldMessenger.of(context).showSnackBar(
               const SnackBar(
-                content: Text('！ 注意喚起を報告しました（30分間表示）'),
+                content: Text('📍 目的地を設定しました'),
                 backgroundColor: Color(0xFF1A3A5C),
               ),
             );
+          } else if (result == 'warning') {
+            await _addWarning(latLng);
+            if (mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text('！ 注意喚起を報告しました（30分間表示）'),
+                  backgroundColor: Color(0xFF1A3A5C),
+                ),
+              );
+            }
           }
         },
       ),
