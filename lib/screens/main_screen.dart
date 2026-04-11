@@ -1138,15 +1138,31 @@ class _MainScreenState extends State<MainScreen> {
               ),
             ],
           ),
-          IconButton(
-            icon: const Icon(Icons.qr_code_rounded, color: Colors.white, size: 22),
-            tooltip: 'QRコードを表示',
-            onPressed: _showQrDialog,
-          ),
-          IconButton(
-            icon: const Icon(Icons.share_rounded, color: Colors.white, size: 22),
-            tooltip: 'ルームを共有',
-            onPressed: _shareRoomCode,
+          PopupMenuButton<String>(
+            icon: const Icon(Icons.more_vert, color: Colors.white),
+            color: const Color(0xFF0D1B2A),
+            onSelected: (value) {
+              if (value == 'qr') _showQrDialog();
+              if (value == 'share') _shareRoomCode();
+            },
+            itemBuilder: (ctx) => [
+              const PopupMenuItem(
+                value: 'qr',
+                child: Row(children: [
+                  Icon(Icons.qr_code_rounded, color: Colors.white, size: 20),
+                  SizedBox(width: 10),
+                  Text('QRコードを表示', style: TextStyle(color: Colors.white)),
+                ]),
+              ),
+              const PopupMenuItem(
+                value: 'share',
+                child: Row(children: [
+                  Icon(Icons.share_rounded, color: Colors.white, size: 20),
+                  SizedBox(width: 10),
+                  Text('ルームを共有', style: TextStyle(color: Colors.white)),
+                ]),
+              ),
+            ],
           ),
           TextButton.icon(
             icon: const Icon(Icons.exit_to_app, color: Colors.white, size: 18),
