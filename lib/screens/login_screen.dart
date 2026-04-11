@@ -21,7 +21,6 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
   final _roomController = TextEditingController();
   bool _isLoading = false;
   bool _isJapanese = true;
-  bool _isJoining = false;
   String? _createdRoomCode;
   late AnimationController _fadeController;
   late AnimationController _pulseController;
@@ -44,6 +43,7 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
     _fadeAnim = CurvedAnimation(parent: _fadeController, curve: Curves.easeOut);
     _pulseAnim = Tween<double>(begin: 1.0, end: 1.08).animate(CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut));
     _fadeController.forward();
+    _roomController.addListener(() => setState(() {}));
   }
 
   @override
@@ -73,7 +73,6 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
         if (code.isNotEmpty && mounted) {
           setState(() {
             _roomController.text = code;
-            _isJoining = true;
           });
         }
       }
@@ -83,12 +82,11 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
     // 起動中のリンクを監視
     final appLinks2 = AppLinks();
     _linkSub = appLinks2.uriLinkStream.listen((uri) {
-      if (uri != null && uri.scheme == 'drivevoice' && uri.host == 'join') {
+      if (uri.scheme == 'drivevoice' && uri.host == 'join') {
         final code = uri.queryParameters['room'] ?? '';
         if (code.isNotEmpty && mounted) {
           setState(() {
             _roomController.text = code;
-            _isJoining = true;
           });
         }
       }
@@ -655,79 +653,59 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
                   ],
                 ),
               ),
-              _buildGradientButton(_isJapanese ? 'ルームを作成' : 'Create Room', Icons.add_circle_outline_rounded, (_isLoading || !_allConsented) ? null : _createRoom),
-              const SizedBox(height: 10),
-              Row(children: [
-                const Expanded(child: Divider(color: Color(0xFF1E3A5F))),
-                Padding(padding: const EdgeInsets.symmetric(horizontal: 14),
-                  child: Text(_isJapanese ? 'または' : 'or', style: const TextStyle(color: Color(0xFF3A5078), fontSize: 13))),
-                const Expanded(child: Divider(color: Color(0xFF1E3A5F))),
-              ]),
-              const SizedBox(height: 8),
-              GestureDetector(
-                onTap: () => setState(() => _isJoining = !_isJoining),
-                child: Container(
-                  width: double.infinity, height: 44,
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(16),
-                    color: _isJoining ? const Color(0xFF111827) : Colors.transparent,
-                    border: Border.all(color: const Color(0xFF1E3A5F), width: 1.5),
+              // ルームコード入力欄（常時表示）
+              Container(
+                decoration: BoxDecoration(
+                  color: const Color(0xFF111827),
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: const Color(0xFF1E3A5F), width: 1.5),
+                ),
+                child: TextField(
+                  controller: _roomController,
+                  style: const TextStyle(color: Colors.white, letterSpacing: 3, fontSize: 18, fontWeight: FontWeight.w700),
+                  textCapitalization: TextCapitalization.characters,
+                  textAlign: TextAlign.center,
+                  decoration: InputDecoration(
+                    hintText: _isJapanese ? 'ルームコード（参加する場合）' : 'Room Code (to join)',
+                    hintStyle: const TextStyle(color: Color(0xFF3A5078), letterSpacing: 1, fontSize: 13),
+                    border: InputBorder.none,
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 18),
                   ),
-                  child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-                    Icon(Icons.login_rounded, color: _isJoining ? const Color(0xFF00D4FF) : const Color(0xFF6680AA), size: 20),
-                    const SizedBox(width: 8),
-                    Text(_isJapanese ? 'コードで参加' : 'Join with Code',
-                      style: TextStyle(color: _isJoining ? Colors.white : const Color(0xFF6680AA), fontWeight: FontWeight.w600)),
-                  ]),
                 ),
               ),
-              if (_isJoining) ...[
-                const SizedBox(height: 16),
-                Container(
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF111827),
-                    borderRadius: BorderRadius.circular(16),
-                    border: Border.all(color: const Color(0xFF1E3A5F), width: 1.5),
-                  ),
-                  child: TextField(
-                    controller: _roomController,
-                    style: const TextStyle(color: Colors.white, letterSpacing: 3, fontSize: 18, fontWeight: FontWeight.w700),
-                    textCapitalization: TextCapitalization.characters,
-                    textAlign: TextAlign.center,
-                    decoration: InputDecoration(
-                      hintText: _isJapanese ? 'ルームコード' : 'Room Code',
-                      hintStyle: const TextStyle(color: Color(0xFF3A5078), letterSpacing: 1),
-                      border: InputBorder.none,
-                      contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 18),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 12),
+              const SizedBox(height: 12),
+              // コードが空なら「ルームを作成」、入力中なら「参加する」
+              if (_roomController.text.isEmpty)
+                _buildGradientButton(_isJapanese ? 'ルームを作成' : 'Create Room', Icons.add_circle_outline_rounded, (_isLoading || !_allConsented) ? null : _createRoom)
+              else
                 GestureDetector(
                   onTap: (_isLoading || !_allConsented) ? null : _enterRoom,
                   child: Container(
-                    width: double.infinity, height: 44,
+                    width: double.infinity, height: 54,
                     decoration: BoxDecoration(
                       borderRadius: BorderRadius.circular(16),
-                      gradient: _isLoading
+                      gradient: (_isLoading || !_allConsented)
                           ? null
                           : const LinearGradient(
                               colors: [Color(0xFF00D4FF), Color(0xFF0057FF)],
                               begin: Alignment.centerLeft,
                               end: Alignment.centerRight,
                             ),
-                      color: _isLoading ? const Color(0xFF1E3A5F) : null,
+                      color: (_isLoading || !_allConsented) ? const Color(0xFF1E3A5F) : null,
                     ),
                     child: Center(
                       child: _isLoading
                           ? const SizedBox(width: 24, height: 24,
                               child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
-                          : Text(_isJapanese ? '参加する' : 'Join',
-                              style: const TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w700)),
+                          : Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                              const Icon(Icons.login_rounded, color: Colors.white, size: 20),
+                              const SizedBox(width: 8),
+                              Text(_isJapanese ? '参加する' : 'Join',
+                                  style: const TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.w700)),
+                            ]),
                     ),
                   ),
                 ),
-              ],
             ],
             if (_createdRoomCode != null) ...[
               const SizedBox(height: 24),
