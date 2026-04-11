@@ -188,20 +188,11 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
         userId = 'u_${DateTime.now().millisecondsSinceEpoch}';
         await prefs2.setString('user_id', userId);
       }
+      await db.ref('rooms/$roomCode/members/$userId').set({
+        'nickname': nickname, 'lat': 35.6812, 'lng': 139.7671,
+      });
       if (!mounted) return;
-      final shareLocation = await _showShareLocationDialog();
-      if (!mounted) return;
-      if (shareLocation == null) {
-        setState(() => _isLoading = false);
-        return;
-      }
-      if (shareLocation) {
-        await db.ref('rooms/$roomCode/members/$userId').set({
-          'nickname': nickname, 'lat': 35.6812, 'lng': 139.7671,
-        });
-      }
-      if (!mounted) return;
-      Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => MainScreen(nickname: nickname, roomCode: roomCode, userId: userId, vehicleType: _vehicleType, initialShareLocation: shareLocation)));
+      Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => MainScreen(nickname: nickname, roomCode: roomCode, userId: userId, vehicleType: _vehicleType)));
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
@@ -220,57 +211,7 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
       await prefs2.setString('user_id', userId);
     }
     if (!mounted) return;
-    final shareLocation = await _showShareLocationDialog();
-    if (!mounted) return;
-    if (shareLocation == null) return;
-    Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => MainScreen(nickname: nickname, roomCode: roomCode, userId: userId, vehicleType: _vehicleType, initialShareLocation: shareLocation)));
-  }
-
-  /// 位置情報共有の確認ダイアログ。OKならtrue、OFFならfalse、キャンセルならnullを返す
-  Future<bool?> _showShareLocationDialog() async {
-    bool shareLocation = false;
-    return showDialog<bool>(
-      context: context,
-      barrierDismissible: false,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setStateDialog) => AlertDialog(
-          backgroundColor: const Color(0xFF0D1B2A),
-          title: const Text('位置情報を共有しますか？', style: TextStyle(color: Colors.white, fontSize: 16)),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Text('ONにすると、ルーム内のメンバーに自分の位置がマップ上に表示されます。\nルーム内でいつでも変更できます。',
-                  style: TextStyle(color: Colors.grey, fontSize: 13)),
-              const SizedBox(height: 20),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Text(shareLocation ? '位置を共有する' : '位置を共有しない',
-                      style: TextStyle(
-                          color: shareLocation ? const Color(0xFF00D4FF) : Colors.grey,
-                          fontWeight: FontWeight.w600)),
-                  Switch(
-                    value: shareLocation,
-                    activeColor: const Color(0xFF00D4FF),
-                    onChanged: (v) => setStateDialog(() => shareLocation = v),
-                  ),
-                ],
-              ),
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx, null),
-              child: const Text('キャンセル', style: TextStyle(color: Colors.grey)),
-            ),
-            TextButton(
-              onPressed: () => Navigator.pop(ctx, shareLocation),
-              child: const Text('始める', style: TextStyle(color: Color(0xFF00D4FF), fontWeight: FontWeight.bold)),
-            ),
-          ],
-        ),
-      ),
-    );
+    Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => MainScreen(nickname: nickname, roomCode: roomCode, userId: userId, vehicleType: _vehicleType)));
   }
 
   void _shareRoomCode(String code) {

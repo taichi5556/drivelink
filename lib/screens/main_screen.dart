@@ -115,6 +115,49 @@ class _MainScreenState extends State<MainScreen> {
       const Duration(minutes: 1),
       (_) => _cleanupExpiredWarnings(),
     );
+    // マップ読み込み完了後に位置共有確認ダイアログを表示
+    WidgetsBinding.instance.addPostFrameCallback((_) => _showLocationSharingDialog());
+  }
+
+  Future<void> _showLocationSharingDialog() async {
+    if (!mounted) return;
+    final share = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF0D1B2A),
+        title: const Text(
+          '⚠️ 再度確認！GPS情報を共有しますか？',
+          style: TextStyle(color: Colors.red, fontSize: 17, fontWeight: FontWeight.bold),
+        ),
+        content: const Text(
+          '自宅・職場など普段いる場所での使用は避けてください。',
+          style: TextStyle(color: Colors.white70, fontSize: 14),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('共有しない', style: TextStyle(color: Colors.grey, fontSize: 15)),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF00D4FF),
+              foregroundColor: Colors.white,
+            ),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('共有する', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+          ),
+        ],
+      ),
+    );
+    if (!mounted) return;
+    final newValue = share ?? false;
+    setState(() => _shareLocation = newValue);
+    if (!newValue) {
+      await _db.child('rooms/${widget.roomCode}/members/${widget.userId}').remove();
+    } else {
+      await _updateLocation();
+    }
   }
 
   void _loadBannerAd() {
@@ -1031,15 +1074,23 @@ class _MainScreenState extends State<MainScreen> {
           ],
         ),
         actions: [
-          // 位置共有トグル
-          IconButton(
-            icon: Icon(
-              _shareLocation ? Icons.location_on : Icons.location_off,
-              color: _shareLocation ? const Color(0xFF00D4FF) : Colors.grey,
-              size: 22,
-            ),
-            tooltip: _shareLocation ? '位置共有ON（タップでOFF）' : '位置共有OFF（タップでON）',
-            onPressed: _toggleLocationSharing,
+          // 位置共有スイッチ
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                _shareLocation ? Icons.location_on : Icons.location_off,
+                color: _shareLocation ? Colors.green : Colors.grey,
+                size: 18,
+              ),
+              Switch(
+                value: _shareLocation,
+                activeColor: Colors.green,
+                inactiveThumbColor: Colors.grey,
+                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                onChanged: (_) => _toggleLocationSharing(),
+              ),
+            ],
           ),
           IconButton(
             icon: const Icon(Icons.share_rounded, color: Colors.white, size: 22),
