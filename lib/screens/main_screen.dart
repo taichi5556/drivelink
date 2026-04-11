@@ -24,14 +24,12 @@ class MainScreen extends StatefulWidget {
   final String nickname;
   final String roomCode;
   final String vehicleType; // 'car' or 'bike'
-  final bool initialShareLocation;
   const MainScreen({
     Key? key,
     required this.userId,
     required this.nickname,
     required this.roomCode,
     this.vehicleType = 'car',
-    this.initialShareLocation = false,
   }) : super(key: key);
 
   @override
@@ -91,7 +89,7 @@ class _MainScreenState extends State<MainScreen> {
   @override
   void initState() {
     super.initState();
-    _shareLocation = widget.initialShareLocation;
+    _shareLocation = false;
     WakelockPlus.enable();
     _initAll();
     _loadBannerAd();
@@ -455,9 +453,10 @@ class _MainScreenState extends State<MainScreen> {
     final picture = recorder.endRecording();
     final image = await picture.toImage(w.toInt(), h.toInt());
     final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
+    if (bytes == null) return BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRed);
     // imagePixelRatio: 2.5 → 画面上の表示サイズ ≈ 幅21dp・高さ28dp
     _warningMarkerCache = BitmapDescriptor.bytes(
-      bytes!.buffer.asUint8List(),
+      bytes.buffer.asUint8List(),
       imagePixelRatio: 2.5,
     );
     return _warningMarkerCache!;
@@ -500,9 +499,10 @@ class _MainScreenState extends State<MainScreen> {
     final picture = recorder.endRecording();
     final image = await picture.toImage(size.toInt(), size.toInt());
     final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
+    if (bytes == null) return BitmapDescriptor.defaultMarker;
     // imagePixelRatio: 2.5 → 画面上の表示サイズ = 52 / 2.5 ≈ 20dp
     final descriptor = BitmapDescriptor.bytes(
-      bytes!.buffer.asUint8List(),
+      bytes.buffer.asUint8List(),
       imagePixelRatio: 2.5,
     );
     _markerCache[key] = descriptor;
@@ -583,34 +583,38 @@ class _MainScreenState extends State<MainScreen> {
           '?origin=$origin&destination=$destination'
           '&mode=driving&language=ja&key=$apiKey';
       final client = HttpClient();
-      final request = await client.getUrl(Uri.parse(url));
-      final response = await request.close();
-      final body = await response.transform(const Utf8Decoder()).join();
-      final data = jsonDecode(body);
-      if (data['status'] == 'OK') {
-        final steps = data['routes'][0]['legs'][0]['steps'] as List;
-        final allCoords = <LatLng>[];
-        for (final step in steps) {
-          final encoded = step['polyline']['points'] as String;
-          final points = PolylinePoints.decodePolyline(encoded);
-          allCoords.addAll(points.map((p) => LatLng(p.latitude, p.longitude)));
+      try {
+        final request = await client.getUrl(Uri.parse(url));
+        final response = await request.close();
+        final body = await response.transform(const Utf8Decoder()).join();
+        final data = jsonDecode(body);
+        if (data['status'] == 'OK') {
+          final steps = data['routes'][0]['legs'][0]['steps'] as List;
+          final allCoords = <LatLng>[];
+          for (final step in steps) {
+            final encoded = step['polyline']['points'] as String;
+            final points = PolylinePoints.decodePolyline(encoded);
+            allCoords.addAll(points.map((p) => LatLng(p.latitude, p.longitude)));
+          }
+          if (allCoords.isNotEmpty && mounted) {
+            setState(() {
+              _polylines = {
+                Polyline(
+                  polylineId: const PolylineId('route'),
+                  points: allCoords,
+                  color: const Color(0xFF1565C0),
+                  width: 5,
+                ),
+              };
+            });
+            _animateCamera(
+              CameraUpdate.newLatLngZoom(_myPosition, 14),
+              programmatic: true,
+            );
+          }
         }
-        if (allCoords.isNotEmpty && mounted) {
-          setState(() {
-            _polylines = {
-              Polyline(
-                polylineId: const PolylineId('route'),
-                points: allCoords,
-                color: const Color(0xFF1565C0),
-                width: 5,
-              ),
-            };
-          });
-          _animateCamera(
-            CameraUpdate.newLatLngZoom(_myPosition, 14),
-            programmatic: true,
-          );
-        }
+      } finally {
+        client.close();
       }
     } catch (e) {
       debugPrint('ルート取得エラー: $e');
@@ -699,26 +703,30 @@ class _MainScreenState extends State<MainScreen> {
                       final encoded = Uri.encodeComponent(val);
                       final url = 'https://maps.googleapis.com/maps/api/place/textsearch/json?query=$encoded&language=ja&region=jp&key=$placesApiKey';
                       final client = HttpClient();
-                      final request = await client.getUrl(Uri.parse(url));
-                      final response = await request.close();
-                      final body = await response.transform(const Utf8Decoder()).join();
-                      final data = jsonDecode(body);
-                      if (data['status'] == 'OK') {
-                        final results = (data['results'] as List).take(5).map((r) {
-                          final loc = r['geometry']['location'];
-                          return {
-                            'name': r['name'] as String,
-                            'address': r['formatted_address'] as String? ?? '',
-                            'lat': (loc['lat'] as num).toDouble(),
-                            'lng': (loc['lng'] as num).toDouble(),
-                          };
-                        }).toList();
-                        setStateDialog(() {
-                          searchResults = List<Map<String, dynamic>>.from(results);
-                          isSearching = false;
-                        });
-                      } else {
-                        setStateDialog(() { searchResults = []; isSearching = false; });
+                      try {
+                        final request = await client.getUrl(Uri.parse(url));
+                        final response = await request.close();
+                        final body = await response.transform(const Utf8Decoder()).join();
+                        final data = jsonDecode(body);
+                        if (data['status'] == 'OK') {
+                          final results = (data['results'] as List).take(5).map((r) {
+                            final loc = r['geometry']['location'];
+                            return {
+                              'name': r['name'] as String,
+                              'address': r['formatted_address'] as String? ?? '',
+                              'lat': (loc['lat'] as num).toDouble(),
+                              'lng': (loc['lng'] as num).toDouble(),
+                            };
+                          }).toList();
+                          setStateDialog(() {
+                            searchResults = List<Map<String, dynamic>>.from(results);
+                            isSearching = false;
+                          });
+                        } else {
+                          setStateDialog(() { searchResults = []; isSearching = false; });
+                        }
+                      } finally {
+                        client.close();
                       }
                     } catch (e) {
                       setStateDialog(() { searchResults = []; isSearching = false; });
@@ -1002,15 +1010,6 @@ class _MainScreenState extends State<MainScreen> {
     _mapController!.animateCamera(update);
   }
 
-  double _calcDistance(double lat, double lng) {
-    const R = 6371.0;
-    final dLat = (lat - _myPosition.latitude) * (3.141592653589793 / 180);
-    final dLng = (lng - _myPosition.longitude) * (3.141592653589793 / 180);
-    final a = (dLat / 2) * (dLat / 2) +
-        (_myPosition.latitude * 3.141592653589793 / 180).abs() *
-            (dLng / 2) * (dLng / 2);
-    return R * 2 * atan2(sqrt(a), sqrt(1 - a));
-  }
 
   @override
   void dispose() {
@@ -1421,7 +1420,7 @@ class _MainScreenState extends State<MainScreen> {
         final nick = m['nickname'] as String? ?? '?';
         final lat = (m['lat'] as num).toDouble();
         final lng = (m['lng'] as num).toDouble();
-        final dist = _calcDistance(lat, lng);
+        final dist = _metersTo(LatLng(lat, lng), _myPosition) / 1000;
         final isMe = uid == widget.userId;
         return ListTile(
           dense: true,
@@ -1461,7 +1460,7 @@ class _MainScreenState extends State<MainScreen> {
           final nick = m['nickname'] as String? ?? '?';
           final lat = (m['lat'] as num).toDouble();
           final lng = (m['lng'] as num).toDouble();
-          final dist = _calcDistance(lat, lng);
+          final dist = _metersTo(LatLng(lat, lng), _myPosition) / 1000;
           final isMe = uid == widget.userId;
           return Padding(
             padding: const EdgeInsets.symmetric(horizontal: 8),
