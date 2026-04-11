@@ -18,6 +18,7 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:app_links/app_links.dart';
 import 'package:flutter_polyline_points/flutter_polyline_points.dart';
 import 'package:share_plus/share_plus.dart';
+import 'package:qr_flutter/qr_flutter.dart';
 
 class MainScreen extends StatefulWidget {
   final String userId;
@@ -1051,6 +1052,49 @@ class _MainScreenState extends State<MainScreen> {
     }
   }
 
+  void _showQrDialog() {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF0D1B2A),
+        title: const Text('QRコード', style: TextStyle(color: Colors.white, fontSize: 16)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              color: Colors.white,
+              padding: const EdgeInsets.all(12),
+              child: QrImageView(
+                data: widget.roomCode,
+                version: QrVersions.auto,
+                size: 220,
+              ),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              widget.roomCode,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 22,
+                fontWeight: FontWeight.bold,
+                letterSpacing: 4,
+              ),
+            ),
+            const SizedBox(height: 4),
+            const Text('このQRコードを仲間に読み取ってもらおう',
+                style: TextStyle(color: Colors.grey, fontSize: 11)),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('閉じる', style: TextStyle(color: Color(0xFF00D4FF))),
+          ),
+        ],
+      ),
+    );
+  }
+
   void _shareRoomCode() {
     final link = 'https://drivelink-a7ffb.web.app/join?room=${widget.roomCode}';
     Share.share('TouriLinkで一緒にツーリングしよう！\nリンクをタップしてルームに参加👇\n$link\n\nリンクが使えない場合はルームコード: ${widget.roomCode}');
@@ -1093,6 +1137,11 @@ class _MainScreenState extends State<MainScreen> {
                 onChanged: (_) => _toggleLocationSharing(),
               ),
             ],
+          ),
+          IconButton(
+            icon: const Icon(Icons.qr_code_rounded, color: Colors.white, size: 22),
+            tooltip: 'QRコードを表示',
+            onPressed: _showQrDialog,
           ),
           IconButton(
             icon: const Icon(Icons.share_rounded, color: Colors.white, size: 22),
