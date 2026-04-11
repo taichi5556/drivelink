@@ -24,12 +24,14 @@ class MainScreen extends StatefulWidget {
   final String nickname;
   final String roomCode;
   final String vehicleType; // 'car' or 'bike'
+  final bool initialShareLocation;
   const MainScreen({
     Key? key,
     required this.userId,
     required this.nickname,
     required this.roomCode,
     this.vehicleType = 'car',
+    this.initialShareLocation = false,
   }) : super(key: key);
 
   @override
@@ -39,6 +41,7 @@ class MainScreen extends StatefulWidget {
 class _MainScreenState extends State<MainScreen> {
   GoogleMapController? _mapController;
   bool _isFollowingMember = false;
+  late bool _shareLocation;
   bool _programmaticCameraMove = false;
   Set<Marker> _markers = {};
   LatLng _myPosition = const LatLng(35.6812, 139.7671);
@@ -88,6 +91,7 @@ class _MainScreenState extends State<MainScreen> {
   @override
   void initState() {
     super.initState();
+    _shareLocation = widget.initialShareLocation;
     WakelockPlus.enable();
     _initAll();
     _loadBannerAd();
@@ -820,13 +824,15 @@ class _MainScreenState extends State<MainScreen> {
     ).listen((pos) async {
       if (!mounted) return;
       setState(() => _myPosition = LatLng(pos.latitude, pos.longitude));
-      await _db.child('rooms/${widget.roomCode}/members/${widget.userId}').update({
-        'nickname': widget.nickname,
-        'lat': pos.latitude,
-        'lng': pos.longitude,
-        'vehicle_type': widget.vehicleType,
-        'last_seen': DateTime.now().millisecondsSinceEpoch,
-      });
+      if (_shareLocation) {
+        await _db.child('rooms/${widget.roomCode}/members/${widget.userId}').update({
+          'nickname': widget.nickname,
+          'lat': pos.latitude,
+          'lng': pos.longitude,
+          'vehicle_type': widget.vehicleType,
+          'last_seen': DateTime.now().millisecondsSinceEpoch,
+        });
+      }
       if (!mounted) return;
       if (!_isFollowingMember && !_programmaticCameraMove) {
         _animateCamera(CameraUpdate.newLatLng(_myPosition), programmatic: true);
@@ -854,13 +860,15 @@ class _MainScreenState extends State<MainScreen> {
       final pos = await Geolocator.getCurrentPosition();
       if (!mounted) return;
       setState(() => _myPosition = LatLng(pos.latitude, pos.longitude));
-      await _db.child('rooms/${widget.roomCode}/members/${widget.userId}').update({
-        'nickname': widget.nickname,
-        'lat': pos.latitude,
-        'lng': pos.longitude,
-        'vehicle_type': widget.vehicleType,
-        'last_seen': DateTime.now().millisecondsSinceEpoch,
-      });
+      if (_shareLocation) {
+        await _db.child('rooms/${widget.roomCode}/members/${widget.userId}').update({
+          'nickname': widget.nickname,
+          'lat': pos.latitude,
+          'lng': pos.longitude,
+          'vehicle_type': widget.vehicleType,
+          'last_seen': DateTime.now().millisecondsSinceEpoch,
+        });
+      }
       if (!mounted) return;
       if (!_isFollowingMember && !_programmaticCameraMove) {
         _animateCamera(
@@ -989,6 +997,18 @@ class _MainScreenState extends State<MainScreen> {
     );
   }
 
+  Future<void> _toggleLocationSharing() async {
+    final newValue = !_shareLocation;
+    setState(() => _shareLocation = newValue);
+    if (!newValue) {
+      // OFF: Firebaseから自分の位置情報を削除（他ユーザーに見えなくなる）
+      await _db.child('rooms/${widget.roomCode}/members/${widget.userId}').remove();
+    } else {
+      // ON: 即座に現在位置をFirebaseに送信
+      await _updateLocation();
+    }
+  }
+
   void _shareRoomCode() {
     final link = 'https://drivelink-a7ffb.web.app/join?room=${widget.roomCode}';
     Share.share('TouriLinkで一緒にツーリングしよう！\nリンクをタップしてルームに参加👇\n$link\n\nリンクが使えない場合はルームコード: ${widget.roomCode}');
@@ -1011,6 +1031,16 @@ class _MainScreenState extends State<MainScreen> {
           ],
         ),
         actions: [
+          // 位置共有トグル
+          IconButton(
+            icon: Icon(
+              _shareLocation ? Icons.location_on : Icons.location_off,
+              color: _shareLocation ? const Color(0xFF00D4FF) : Colors.grey,
+              size: 22,
+            ),
+            tooltip: _shareLocation ? '位置共有ON（タップでOFF）' : '位置共有OFF（タップでON）',
+            onPressed: _toggleLocationSharing,
+          ),
           IconButton(
             icon: const Icon(Icons.share_rounded, color: Colors.white, size: 22),
             tooltip: 'ルームを共有',
