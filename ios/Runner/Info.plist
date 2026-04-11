@@ -87,6 +87,10 @@
 	<string>ドライブ中のメンバーと位置情報を共有するために使用します。</string>
 	<key>GADApplicationIdentifier</key>
 	<string>ca-app-pub-4544332023567609~3044889361</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>location</string>
+	</array>
 
 </dict>
 </plist>

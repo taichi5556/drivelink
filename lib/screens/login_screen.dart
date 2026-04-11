@@ -556,7 +556,8 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
           decoration: BoxDecoration(shape: BoxShape.circle, color: const Color(0xFF00D4FF).withOpacity(0.07)))),
         Positioned(bottom: -60, right: -40, child: Container(width: 220, height: 220,
           decoration: BoxDecoration(shape: BoxShape.circle, color: const Color(0xFF0057FF).withOpacity(0.08)))),
-        SafeArea(child: FadeTransition(opacity: _fadeAnim, child: SingleChildScrollView(
+        SafeArea(child: FadeTransition(opacity: _fadeAnim, child: Column(children: [
+          Expanded(child: SingleChildScrollView(
           padding: const EdgeInsets.symmetric(horizontal: 24),
           child: Column(children: [
             const SizedBox(height: 16),
@@ -802,15 +803,18 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
                   ),
                 ]),
               ),
-              const SizedBox(height: 20),
-              _buildGradientButton(
-                _isJapanese ? 'マップを開く' : 'Open Map',
-                Icons.map_rounded,
-                _startFromCreated),
             ],
-            const SizedBox(height: 40),
+            const SizedBox(height: 20),
           ]),
-        ))),
+        )),
+          if (_createdRoomCode != null) Padding(
+            padding: const EdgeInsets.fromLTRB(24, 8, 24, 16),
+            child: _buildGradientButton(
+              _isJapanese ? 'マップを開く' : 'Open Map',
+              Icons.map_rounded,
+              _startFromCreated),
+          ),
+        ])))
       ]),
     );
   }

@@ -17,6 +17,7 @@ import 'login_screen.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:app_links/app_links.dart';
 import 'package:flutter_polyline_points/flutter_polyline_points.dart';
+import 'package:share_plus/share_plus.dart';
 
 class MainScreen extends StatefulWidget {
   final String userId;
@@ -44,7 +45,7 @@ class _MainScreenState extends State<MainScreen> {
   Timer? _expiryTimer;
   String _remainingTime = '';
   Timer? _countdownTimer;
-  Timer? _locationTimer;
+  StreamSubscription<Position>? _locationSubscription;
   bool _updateLocationInProgress = false;
   bool _expiryHandled = false;
   Map<String, dynamic> _members = {};
@@ -62,8 +63,8 @@ class _MainScreenState extends State<MainScreen> {
 
   // ルート逸脱自動再検索
   DateTime? _lastRerouteTime;
-  static const _rerouteThresholdMeters = 80.0;  // 逸脱判定距離
-  static const _rerouteCooldownSecs    = 60;     // 再検索間隔（秒）
+  static const _rerouteThresholdMeters = 50.0;  // 逸脱判定距離
+  static const _rerouteCooldownSecs    = 20;     // 再検索間隔（秒）
 
   // 警告ポイント関連
   Map<String, dynamic> _warnings = {};
@@ -95,10 +96,7 @@ class _MainScreenState extends State<MainScreen> {
   Future<void> _initAll() async {
     await Permission.locationWhenInUse.request();
     await _updateLocation();
-    _locationTimer = Timer.periodic(
-      const Duration(seconds: 2),
-      (_) => _updateLocation(),
-    );
+    _startLocationStream();
     _listenToMembers();
     _listenToDestination();
     _listenToWarnings();
@@ -729,6 +727,55 @@ class _MainScreenState extends State<MainScreen> {
     });
   }
 
+  LocationSettings _buildLocationSettings() {
+    if (Platform.isAndroid) {
+      return AndroidSettings(
+        accuracy: LocationAccuracy.high,
+        intervalDuration: const Duration(seconds: 2),
+        foregroundNotificationConfig: const ForegroundNotificationConfig(
+          notificationText: 'バックグラウンドで位置情報を更新中',
+          notificationTitle: 'TouriLink',
+          enableWakeLock: true,
+        ),
+      );
+    } else if (Platform.isIOS) {
+      return AppleSettings(
+        accuracy: LocationAccuracy.high,
+        activityType: ActivityType.automotiveNavigation,
+        pauseLocationUpdatesAutomatically: false,
+        allowBackgroundLocationUpdates: true,
+        showBackgroundLocationIndicator: true,
+      );
+    }
+    return const LocationSettings(
+      accuracy: LocationAccuracy.high,
+      distanceFilter: 5,
+    );
+  }
+
+  void _startLocationStream() {
+    _locationSubscription = Geolocator.getPositionStream(
+      locationSettings: _buildLocationSettings(),
+    ).listen((pos) async {
+      if (!mounted) return;
+      setState(() => _myPosition = LatLng(pos.latitude, pos.longitude));
+      await _db.child('rooms/${widget.roomCode}/members/${widget.userId}').update({
+        'nickname': widget.nickname,
+        'lat': pos.latitude,
+        'lng': pos.longitude,
+        'vehicle_type': widget.vehicleType,
+        'last_seen': DateTime.now().millisecondsSinceEpoch,
+      });
+      if (!mounted) return;
+      if (!_isFollowingMember && !_programmaticCameraMove) {
+        _animateCamera(CameraUpdate.newLatLng(_myPosition), programmatic: true);
+      }
+      _checkRouteDeviation();
+    }, onError: (e) {
+      debugPrint('位置情報ストリームエラー: $e');
+    });
+  }
+
   Future<void> _updateLocation() async {
     if (_updateLocationInProgress) return;
     _updateLocationInProgress = true;
@@ -739,7 +786,7 @@ class _MainScreenState extends State<MainScreen> {
         final requested = await Geolocator.requestPermission();
         if (requested == LocationPermission.denied ||
             requested == LocationPermission.deniedForever) {
-          _locationTimer?.cancel();
+          _locationSubscription?.cancel();
           return;
         }
       }
@@ -856,7 +903,7 @@ class _MainScreenState extends State<MainScreen> {
   @override
   void dispose() {
     WakelockPlus.disable();
-    _locationTimer?.cancel();
+    _locationSubscription?.cancel();
     _countdownTimer?.cancel();
     _expiryTimer?.cancel();
     _warningCleanupTimer?.cancel();
@@ -881,6 +928,11 @@ class _MainScreenState extends State<MainScreen> {
     );
   }
 
+  void _shareRoomCode() {
+    final link = 'https://drivelink-a7ffb.web.app/join?room=${widget.roomCode}';
+    Share.share('TouriLinkで一緒にツーリングしよう！\nリンクをタップしてルームに参加👇\n$link\n\nリンクが使えない場合はルームコード: ${widget.roomCode}');
+  }
+
   // 縦向きレイアウト
   Widget _buildPortraitLayout() {
     return Scaffold(
@@ -898,6 +950,11 @@ class _MainScreenState extends State<MainScreen> {
           ],
         ),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.share_rounded, color: Colors.white, size: 22),
+            tooltip: 'ルームを共有',
+            onPressed: _shareRoomCode,
+          ),
           TextButton.icon(
             icon: const Icon(Icons.exit_to_app, color: Colors.white, size: 18),
             label: const Text('退出', style: TextStyle(color: Colors.white, fontSize: 13)),
