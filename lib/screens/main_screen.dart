@@ -131,7 +131,7 @@ class _MainScreenState extends State<MainScreen> {
           style: TextStyle(color: Colors.red, fontSize: 17, fontWeight: FontWeight.bold),
         ),
         content: const Text(
-          '自宅・職場など普段いる場所での使用は避けてください。',
+          '自宅・職場など普段いる場所での使用は避けてください。\nルーム入室後でも変更できます。',
           style: TextStyle(color: Colors.white70, fontSize: 14),
         ),
         actions: [
@@ -1074,14 +1074,17 @@ class _MainScreenState extends State<MainScreen> {
           ],
         ),
         actions: [
-          // 位置共有スイッチ
+          // 位置共有スイッチ（GPSラベル付き）
           Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(
-                _shareLocation ? Icons.location_on : Icons.location_off,
-                color: _shareLocation ? Colors.green : Colors.grey,
-                size: 18,
+              Text(
+                'GPS',
+                style: TextStyle(
+                  color: _shareLocation ? Colors.green : Colors.grey,
+                  fontSize: 12,
+                  fontWeight: FontWeight.bold,
+                ),
               ),
               Switch(
                 value: _shareLocation,
