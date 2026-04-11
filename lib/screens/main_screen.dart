@@ -356,6 +356,50 @@ class _MainScreenState extends State<MainScreen> {
     }
   }
 
+  BitmapDescriptor? _warningMarkerCache;
+
+  Future<BitmapDescriptor> _getWarningMarker() async {
+    if (_warningMarkerCache != null) return _warningMarkerCache!;
+    const size = 52.0;
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder);
+
+    // 赤い円
+    canvas.drawCircle(
+      const Offset(size / 2, size / 2),
+      size / 2 - 1,
+      Paint()..color = const Color(0xFFD32F2F),
+    );
+    // 白枠
+    canvas.drawCircle(
+      const Offset(size / 2, size / 2),
+      size / 2 - 1,
+      Paint()
+        ..color = Colors.white
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2,
+    );
+    // 白い「!」
+    final tp = TextPainter(textDirection: TextDirection.ltr)
+      ..text = const TextSpan(
+          text: '!',
+          style: TextStyle(
+              fontSize: 30,
+              fontWeight: FontWeight.bold,
+              color: Colors.white))
+      ..layout();
+    tp.paint(canvas, Offset((size - tp.width) / 2, (size - tp.height) / 2));
+
+    final picture = recorder.endRecording();
+    final image = await picture.toImage(size.toInt(), size.toInt());
+    final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
+    _warningMarkerCache = BitmapDescriptor.bytes(
+      bytes!.buffer.asUint8List(),
+      imagePixelRatio: 2.5,
+    );
+    return _warningMarkerCache!;
+  }
+
   Future<BitmapDescriptor> _getVehicleMarker(String vehicleType, bool isMe) async {
     final key = '$vehicleType-$isMe';
     if (_markerCache.containsKey(key)) return _markerCache[key]!;
@@ -435,6 +479,7 @@ class _MainScreenState extends State<MainScreen> {
     }
 
     // 警告マーカー
+    final warningIcon = await _getWarningMarker();
     _warnings.forEach((id, val) {
       final w = val as Map;
       final lat = (w['lat'] as num).toDouble();
@@ -443,7 +488,7 @@ class _MainScreenState extends State<MainScreen> {
       newMarkers.add(Marker(
         markerId: MarkerId('warning_$id'),
         position: LatLng(lat, lng),
-        icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRed),
+        icon: warningIcon,
         infoWindow: InfoWindow(
           title: '！ 注意喚起',
           snippet: '$nickが報告',
