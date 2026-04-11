@@ -1065,7 +1065,7 @@ class _MainScreenState extends State<MainScreen> {
               color: Colors.white,
               padding: const EdgeInsets.all(12),
               child: QrImageView(
-                data: widget.roomCode,
+                data: 'https://drivelink-a7ffb.web.app/join?room=${widget.roomCode}',
                 version: QrVersions.auto,
                 size: 220,
               ),
