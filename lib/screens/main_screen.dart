@@ -1406,7 +1406,7 @@ class _MainScreenState extends State<MainScreen> {
             color: const Color(0xFF1A3A5C),
             onTap: () {
               setState(() => _isFollowingMember = false);
-              _animateCamera(CameraUpdate.newLatLng(_myPosition), programmatic: true);
+              _animateCamera(CameraUpdate.newLatLngZoom(_myPosition, 15.5), programmatic: true);
             },
           ),
           _buildActionBtn(

@@ -23,9 +23,7 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
   bool _isJapanese = true;
   String? _createdRoomCode;
   late AnimationController _fadeController;
-  late AnimationController _pulseController;
   late Animation<double> _fadeAnim;
-  late Animation<double> _pulseAnim;
   StreamSubscription? _linkSub;
   bool _consentLocation = false;
   bool _consentDriving  = false;
@@ -39,9 +37,7 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
     _initDeepLink();
     _loadNickname();
     _fadeController = AnimationController(duration: const Duration(milliseconds: 1000), vsync: this);
-    _pulseController = AnimationController(duration: const Duration(seconds: 2), vsync: this)..repeat(reverse: true);
     _fadeAnim = CurvedAnimation(parent: _fadeController, curve: Curves.easeOut);
-    _pulseAnim = Tween<double>(begin: 1.0, end: 1.08).animate(CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut));
     _fadeController.forward();
     _roomController.addListener(() => setState(() {}));
   }
@@ -52,11 +48,9 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
     _linkSub?.cancel();
     _roomController.dispose();
     _fadeController.dispose();
-    _pulseController.dispose();
     super.dispose();
   }
 
-  String get _subtitle => _isJapanese ? 'ドライブ仲間と繋がろう' : 'Connect with your drive buddies';
   String get _nickLabel => _isJapanese ? 'ニックネーム' : 'Nickname';
   String get _roomLabel => _isJapanese ? 'ルームコード' : 'Room Code';
   String get _startLabel => _isJapanese ? 'ドライブ開始！' : 'Start Drive!';
@@ -558,8 +552,9 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
           Expanded(child: SingleChildScrollView(
           padding: const EdgeInsets.symmetric(horizontal: 24),
           child: Column(children: [
-            const SizedBox(height: 16),
-            Row(mainAxisAlignment: MainAxisAlignment.end, children: [
+            const SizedBox(height: 6),
+            Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+              const Text('TouriLink', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w900, color: Colors.white, letterSpacing: 1.5)),
               GestureDetector(
                 onTap: () => setState(() => _isJapanese = !_isJapanese),
                 child: Container(
@@ -573,20 +568,6 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
                 ),
               ),
             ]),
-            const SizedBox(height: 4),
-            ScaleTransition(scale: _pulseAnim, child: Container(
-              width: 48, height: 48,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                gradient: const LinearGradient(colors: [Color(0xFF00D4FF), Color(0xFF0057FF)], begin: Alignment.topLeft, end: Alignment.bottomRight),
-                boxShadow: [BoxShadow(color: const Color(0xFF00D4FF).withOpacity(0.5), blurRadius: 32, spreadRadius: 4)],
-              ),
-              child: const Icon(Icons.directions_car_rounded, color: Colors.white, size: 24),
-            )),
-            const SizedBox(height: 4),
-            const Text('TouriLink', style: TextStyle(fontSize: 22, fontWeight: FontWeight.w900, color: Colors.white, letterSpacing: 2)),
-            const SizedBox(height: 2),
-            Text(_subtitle, style: const TextStyle(fontSize: 12, color: Color(0xFF6680AA), letterSpacing: 0.5)),
             const SizedBox(height: 8),
             _buildTextField(_nicknameController, _nickLabel, Icons.person_outline_rounded),
             const SizedBox(height: 8),
@@ -653,27 +634,6 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
                   ],
                 ),
               ),
-              // ルームコード入力欄（常時表示）
-              Container(
-                decoration: BoxDecoration(
-                  color: const Color(0xFF111827),
-                  borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: const Color(0xFF1E3A5F), width: 1.5),
-                ),
-                child: TextField(
-                  controller: _roomController,
-                  style: const TextStyle(color: Colors.white, letterSpacing: 3, fontSize: 18, fontWeight: FontWeight.w700),
-                  textCapitalization: TextCapitalization.characters,
-                  textAlign: TextAlign.center,
-                  decoration: InputDecoration(
-                    hintText: _isJapanese ? 'ルームコード（参加する場合）' : 'Room Code (to join)',
-                    hintStyle: const TextStyle(color: Color(0xFF3A5078), letterSpacing: 1, fontSize: 13),
-                    border: InputBorder.none,
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 18),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 12),
               // コードが空なら「ルームを作成」、入力中なら「参加する」
               if (_roomController.text.isEmpty)
                 _buildGradientButton(_isJapanese ? 'ルームを作成' : 'Create Room', Icons.add_circle_outline_rounded, (_isLoading || !_allConsented) ? null : _createRoom)
@@ -706,28 +666,50 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
                     ),
                   ),
                 ),
+              const SizedBox(height: 12),
+              // ルームコード入力欄（常時表示）
+              Container(
+                decoration: BoxDecoration(
+                  color: const Color(0xFF111827),
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: const Color(0xFF1E3A5F), width: 1.5),
+                ),
+                child: TextField(
+                  controller: _roomController,
+                  style: const TextStyle(color: Colors.white, letterSpacing: 3, fontSize: 18, fontWeight: FontWeight.w700),
+                  textCapitalization: TextCapitalization.characters,
+                  textAlign: TextAlign.center,
+                  decoration: InputDecoration(
+                    hintText: _isJapanese ? 'ルームコード（参加する場合）' : 'Room Code (to join)',
+                    hintStyle: const TextStyle(color: Color(0xFF3A5078), letterSpacing: 1, fontSize: 13),
+                    border: InputBorder.none,
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 18),
+                  ),
+                ),
+              ),
             ],
             if (_createdRoomCode != null) ...[
-              const SizedBox(height: 12),
+              const SizedBox(height: 8),
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                padding: const EdgeInsets.fromLTRB(12, 10, 12, 4),
                 decoration: BoxDecoration(
                   color: const Color(0xFF0D1B2A),
                   borderRadius: BorderRadius.circular(20),
                   border: Border.all(color: const Color(0xFF00D4FF).withValues(alpha: 0.4), width: 1.5),
                 ),
                 child: Column(mainAxisSize: MainAxisSize.min, children: [
-                  const SizedBox(height: 4),
-                  const Icon(Icons.check_circle_outline_rounded, color: Color(0xFF00D4FF), size: 30),
+                  Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                    const Icon(Icons.check_circle_outline_rounded, color: Color(0xFF00D4FF), size: 22),
+                    const SizedBox(width: 8),
+                    Text(_isJapanese ? 'ルーム作成完了！' : 'Room Created!',
+                      style: const TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.w700)),
+                  ]),
                   const SizedBox(height: 6),
-                  Text(_isJapanese ? 'ルーム作成完了！' : 'Room Created!',
-                    style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w700)),
-                  const SizedBox(height: 8),
                   Text(_isJapanese ? 'ルームコード' : 'Room Code',
                     style: const TextStyle(color: Color(0xFF6680AA), fontSize: 10)),
-                  const SizedBox(height: 4),
+                  const SizedBox(height: 3),
                   Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+                    padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 6),
                     decoration: BoxDecoration(
                       color: const Color(0xFF111827),
                       borderRadius: BorderRadius.circular(12),
@@ -736,49 +718,53 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
                     child: Text(_createdRoomCode!, style: const TextStyle(
                       color: Color(0xFF00D4FF), fontSize: 26, fontWeight: FontWeight.w900, letterSpacing: 6)),
                   ),
-                  const SizedBox(height: 10),
+                  const SizedBox(height: 6),
                   Row(mainAxisAlignment: MainAxisAlignment.center, children: [
                     GestureDetector(
                       onTap: () => _copyRoomCode(_createdRoomCode!),
                       child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
                         decoration: BoxDecoration(
                           color: const Color(0xFF111827),
                           borderRadius: BorderRadius.circular(10),
                           border: Border.all(color: const Color(0xFF1E3A5F)),
                         ),
                         child: Row(children: [
-                          const Icon(Icons.copy_rounded, color: Color(0xFF00D4FF), size: 16),
-                          const SizedBox(width: 6),
+                          const Icon(Icons.copy_rounded, color: Color(0xFF00D4FF), size: 14),
+                          const SizedBox(width: 5),
                           Text(_isJapanese ? 'コピー' : 'Copy',
-                            style: const TextStyle(color: Color(0xFF00D4FF), fontSize: 13)),
+                            style: const TextStyle(color: Color(0xFF00D4FF), fontSize: 12)),
                         ]),
                       ),
                     ),
-                    const SizedBox(width: 12),
+                    const SizedBox(width: 10),
                     GestureDetector(
                       onTap: () => _shareRoomCode(_createdRoomCode!),
                       child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
                         decoration: BoxDecoration(
                           color: const Color(0xFF111827),
                           borderRadius: BorderRadius.circular(10),
                           border: Border.all(color: const Color(0xFF1E3A5F)),
                         ),
                         child: Row(children: [
-                          const Icon(Icons.share_rounded, color: Color(0xFF00D4FF), size: 16),
-                          const SizedBox(width: 6),
+                          const Icon(Icons.share_rounded, color: Color(0xFF00D4FF), size: 14),
+                          const SizedBox(width: 5),
                           Text(_isJapanese ? '共有' : 'Share',
-                            style: const TextStyle(color: Color(0xFF00D4FF), fontSize: 13)),
+                            style: const TextStyle(color: Color(0xFF00D4FF), fontSize: 12)),
                         ]),
                       ),
                     ),
                   ]),
-                  const SizedBox(height: 4),
                   TextButton(
+                    style: TextButton.styleFrom(
+                      minimumSize: Size.zero,
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    ),
                     onPressed: () => setState(() => _createdRoomCode = null),
                     child: Text(_isJapanese ? '← 戻る' : '← Back',
-                      style: const TextStyle(color: Color(0xFF3A5078))),
+                      style: const TextStyle(color: Color(0xFF3A5078), fontSize: 12)),
                   ),
                 ]),
               ),
