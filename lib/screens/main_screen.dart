@@ -46,6 +46,7 @@ class _MainScreenState extends State<MainScreen> {
   Timer? _countdownTimer;
   Timer? _locationTimer;
   bool _updateLocationInProgress = false;
+  bool _expiryHandled = false;
   Map<String, dynamic> _members = {};
   StreamSubscription? _membersSubscription;
 
@@ -102,7 +103,7 @@ class _MainScreenState extends State<MainScreen> {
     _listenToDestination();
     _listenToWarnings();
     _initAppLinks();
-    _startExpiryCheck();
+    await _startExpiryCheck();
     // 期限切れ警告ポイントを1分ごとに削除
     _warningCleanupTimer = Timer.periodic(
       const Duration(minutes: 1),
@@ -130,26 +131,31 @@ class _MainScreenState extends State<MainScreen> {
   }
 
   Future<void> _startExpiryCheck() async {
-    final snapshot = await _db.child('rooms/${widget.roomCode}/info/expires_at').get();
-    if (!mounted) return;
-    final expiresAt = snapshot.value as int?;
-    if (expiresAt == null) return;
-    final remaining = expiresAt - DateTime.now().millisecondsSinceEpoch;
-    if (remaining <= 0) {
-      _exitDueToExpiry();
-      return;
-    }
-    if (remaining > 5 * 60 * 1000) {
-      Timer(Duration(milliseconds: remaining - 5 * 60 * 1000), () {
-        if (!mounted) return;
+    try {
+      final snapshot = await _db.child('rooms/${widget.roomCode}/info/expires_at').get();
+      if (!mounted) return;
+      // Firebase は iOS で double を返す場合があるため num? でキャスト
+      final expiresAt = (snapshot.value as num?)?.toInt();
+      if (expiresAt == null || expiresAt <= 0) return;
+      final remaining = expiresAt - DateTime.now().millisecondsSinceEpoch;
+      if (remaining <= 0) {
+        _exitDueToExpiry();
+        return;
+      }
+      if (remaining > 5 * 60 * 1000) {
+        Timer(Duration(milliseconds: remaining - 5 * 60 * 1000), () {
+          if (!mounted) return;
+          _startCountdown(expiresAt);
+        });
+      } else {
         _startCountdown(expiresAt);
+      }
+      _expiryTimer = Timer(Duration(milliseconds: remaining), () {
+        if (mounted) _exitDueToExpiry();
       });
-    } else {
-      _startCountdown(expiresAt);
+    } catch (e) {
+      debugPrint('expiryCheck error: $e');
     }
-    _expiryTimer = Timer(Duration(milliseconds: remaining), () {
-      if (mounted) _exitDueToExpiry();
-    });
   }
 
   void _startCountdown(int expiresAt) {
@@ -177,7 +183,8 @@ class _MainScreenState extends State<MainScreen> {
   }
 
   void _exitDueToExpiry() {
-    if (!mounted) return;
+    if (!mounted || _expiryHandled) return;
+    _expiryHandled = true;
     showDialog(
       context: context,
       barrierDismissible: false,

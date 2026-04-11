@@ -162,16 +162,35 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
     if (roomCode.isEmpty) { ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(_emptyRoom))); return; }
     setState(() => _isLoading = true);
     try {
+      final db = FirebaseDatabase.instanceFor(
+        app: Firebase.app(),
+        databaseURL: 'https://drivelink-a7ffb-default-rtdb.asia-southeast1.firebasedatabase.app',
+      );
+      // ルームの有効期限を確認してから入室
+      final expirySnapshot = await db.ref('rooms/$roomCode/info/expires_at').get();
+      final expiresAt = (expirySnapshot.value as num?)?.toInt();
+      if (!mounted) return;
+      if (expiresAt == null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(_isJapanese ? 'ルームが見つかりません' : 'Room not found')),
+        );
+        setState(() => _isLoading = false);
+        return;
+      }
+      if (expiresAt <= DateTime.now().millisecondsSinceEpoch) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(_isJapanese ? 'このルームは有効期限が切れています' : 'This room has expired')),
+        );
+        setState(() => _isLoading = false);
+        return;
+      }
       final prefs2 = await SharedPreferences.getInstance();
       String userId = prefs2.getString('user_id') ?? '';
       if (userId.isEmpty) {
         userId = 'u_${DateTime.now().millisecondsSinceEpoch}';
         await prefs2.setString('user_id', userId);
       }
-      await FirebaseDatabase.instanceFor(
-        app: Firebase.app(),
-        databaseURL: 'https://drivelink-a7ffb-default-rtdb.asia-southeast1.firebasedatabase.app',
-      ).ref('rooms/$roomCode/members/$userId').set({
+      await db.ref('rooms/$roomCode/members/$userId').set({
         'nickname': nickname, 'lat': 35.6812, 'lng': 139.7671,
       });
       if (!mounted) return;
