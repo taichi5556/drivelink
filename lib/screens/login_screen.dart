@@ -708,39 +708,40 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
                 ),
             ],
             if (_createdRoomCode != null) ...[
-              const SizedBox(height: 24),
+              const SizedBox(height: 12),
               Container(
-                padding: const EdgeInsets.all(10),
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
                 decoration: BoxDecoration(
                   color: const Color(0xFF0D1B2A),
                   borderRadius: BorderRadius.circular(20),
                   border: Border.all(color: const Color(0xFF00D4FF).withValues(alpha: 0.4), width: 1.5),
                 ),
                 child: Column(mainAxisSize: MainAxisSize.min, children: [
-                  const Icon(Icons.check_circle_outline_rounded, color: Color(0xFF00D4FF), size: 36),
-                  const SizedBox(height: 12),
+                  const SizedBox(height: 4),
+                  const Icon(Icons.check_circle_outline_rounded, color: Color(0xFF00D4FF), size: 30),
+                  const SizedBox(height: 6),
                   Text(_isJapanese ? 'ルーム作成完了！' : 'Room Created!',
-                    style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w700)),
-                  const SizedBox(height: 16),
+                    style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w700)),
+                  const SizedBox(height: 8),
                   Text(_isJapanese ? 'ルームコード' : 'Room Code',
                     style: const TextStyle(color: Color(0xFF6680AA), fontSize: 10)),
-                  const SizedBox(height: 8),
+                  const SizedBox(height: 4),
                   Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
+                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
                     decoration: BoxDecoration(
                       color: const Color(0xFF111827),
                       borderRadius: BorderRadius.circular(12),
                       border: Border.all(color: const Color(0xFF1E3A5F)),
                     ),
                     child: Text(_createdRoomCode!, style: const TextStyle(
-                      color: Color(0xFF00D4FF), fontSize: 28, fontWeight: FontWeight.w900, letterSpacing: 6)),
+                      color: Color(0xFF00D4FF), fontSize: 26, fontWeight: FontWeight.w900, letterSpacing: 6)),
                   ),
-                  const SizedBox(height: 16),
+                  const SizedBox(height: 10),
                   Row(mainAxisAlignment: MainAxisAlignment.center, children: [
                     GestureDetector(
                       onTap: () => _copyRoomCode(_createdRoomCode!),
                       child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                         decoration: BoxDecoration(
                           color: const Color(0xFF111827),
                           borderRadius: BorderRadius.circular(10),
@@ -758,7 +759,7 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
                     GestureDetector(
                       onTap: () => _shareRoomCode(_createdRoomCode!),
                       child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                         decoration: BoxDecoration(
                           color: const Color(0xFF111827),
                           borderRadius: BorderRadius.circular(10),
@@ -773,7 +774,7 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
                       ),
                     ),
                   ]),
-                  const SizedBox(height: 12),
+                  const SizedBox(height: 4),
                   TextButton(
                     onPressed: () => setState(() => _createdRoomCode = null),
                     child: Text(_isJapanese ? '← 戻る' : '← Back',
