@@ -95,6 +95,10 @@ class _MainScreenState extends State<MainScreen> {
 
   Future<void> _initAll() async {
     await Permission.locationWhenInUse.request();
+    // Android 13以降: 通知権限が必須（フォアグラウンドサービス通知に必要）
+    if (Platform.isAndroid) {
+      await Permission.notification.request();
+    }
     await _updateLocation();
     _startLocationStream();
     _listenToMembers();
@@ -360,39 +364,51 @@ class _MainScreenState extends State<MainScreen> {
 
   Future<BitmapDescriptor> _getWarningMarker() async {
     if (_warningMarkerCache != null) return _warningMarkerCache!;
-    const size = 52.0;
+    // キャンバスサイズ: 幅52, 高さ70（ピンの先端を収めるため縦長）
+    const w = 52.0;
+    const h = 70.0;
+    const r = 24.0; // 円の半径
+    const cx = w / 2; // 円の中心X
+    const cy = r + 2; // 円の中心Y（上から少し余白）
+
     final recorder = ui.PictureRecorder();
     final canvas = Canvas(recorder);
 
-    // 赤い円
+    // ピン形状（円 + 下向き三角）のパス
+    final path = Path()
+      ..addOval(Rect.fromCircle(center: const Offset(cx, cy), radius: r))
+      ..moveTo(cx - r * 0.45, cy + r * 0.75)
+      ..lineTo(cx + r * 0.45, cy + r * 0.75)
+      ..lineTo(cx, h - 2)
+      ..close();
+
+    // 赤塗り
+    canvas.drawPath(path, Paint()..color = const Color(0xFFD32F2F));
+    // 白枠（円部分のみ）
     canvas.drawCircle(
-      const Offset(size / 2, size / 2),
-      size / 2 - 1,
-      Paint()..color = const Color(0xFFD32F2F),
-    );
-    // 白枠
-    canvas.drawCircle(
-      const Offset(size / 2, size / 2),
-      size / 2 - 1,
+      const Offset(cx, cy),
+      r,
       Paint()
         ..color = Colors.white
         ..style = PaintingStyle.stroke
-        ..strokeWidth = 2,
+        ..strokeWidth = 2.5,
     );
-    // 白い「!」
+
+    // 白い「!」を円の中央に描画
     final tp = TextPainter(textDirection: TextDirection.ltr)
       ..text = const TextSpan(
           text: '!',
           style: TextStyle(
-              fontSize: 30,
+              fontSize: 32,
               fontWeight: FontWeight.bold,
               color: Colors.white))
       ..layout();
-    tp.paint(canvas, Offset((size - tp.width) / 2, (size - tp.height) / 2));
+    tp.paint(canvas, Offset(cx - tp.width / 2, cy - tp.height / 2));
 
     final picture = recorder.endRecording();
-    final image = await picture.toImage(size.toInt(), size.toInt());
+    final image = await picture.toImage(w.toInt(), h.toInt());
     final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
+    // imagePixelRatio: 2.5 → 画面上の表示サイズ ≈ 幅21dp・高さ28dp
     _warningMarkerCache = BitmapDescriptor.bytes(
       bytes!.buffer.asUint8List(),
       imagePixelRatio: 2.5,
