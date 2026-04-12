@@ -111,6 +111,16 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
     return List.generate(8, (_) => chars[rand.nextInt(chars.length)]).join();
   }
 
+  // Firebase Anonymous Auth で端末固有の安定したUIDを取得
+  Future<String> _getStableUserId() async {
+    User? user = FirebaseAuth.instance.currentUser;
+    if (user == null) {
+      final credential = await FirebaseAuth.instance.signInAnonymously();
+      user = credential.user!;
+    }
+    return user.uid;
+  }
+
   Future<void> _createRoom() async {
     final nickname = _nicknameController.text.trim();
     await _saveNickname(nickname);
@@ -121,12 +131,6 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
     setState(() => _isLoading = true);
     try {
       final roomCode = _generateRoomCode();
-      final prefs2 = await SharedPreferences.getInstance();
-      String userId = prefs2.getString('user_id') ?? '';
-      if (userId.isEmpty) {
-        userId = 'u_${DateTime.now().millisecondsSinceEpoch}';
-        await prefs2.setString('user_id', userId);
-      }
       final expiresAt = DateTime.now().millisecondsSinceEpoch + (_selectedHours * 3600 * 1000);
       final db = FirebaseDatabase.instanceFor(
         app: Firebase.app(),
@@ -176,14 +180,9 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
         setState(() => _isLoading = false);
         return;
       }
-      final prefs2 = await SharedPreferences.getInstance();
-      String userId = prefs2.getString('user_id') ?? '';
-      if (userId.isEmpty) {
-        userId = 'u_${DateTime.now().millisecondsSinceEpoch}';
-        await prefs2.setString('user_id', userId);
-      }
-      await db.ref('rooms/$roomCode/members/$userId').set({
-        'nickname': nickname, 'lat': 35.6812, 'lng': 139.7671,
+      final userId = await _getStableUserId();
+      await db.ref('rooms/$roomCode/members/$userId').update({
+        'nickname': nickname, 'vehicle_type': _vehicleType,
       });
       if (!mounted) return;
       Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => MainScreen(nickname: nickname, roomCode: roomCode, userId: userId, vehicleType: _vehicleType)));
@@ -198,12 +197,7 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
   Future<void> _startFromCreated() async {
     final nickname = _nicknameController.text.trim();
     final roomCode = _createdRoomCode!;
-    final prefs2 = await SharedPreferences.getInstance();
-    String userId = prefs2.getString('user_id') ?? '';
-    if (userId.isEmpty) {
-      userId = 'u_${DateTime.now().millisecondsSinceEpoch}';
-      await prefs2.setString('user_id', userId);
-    }
+    final userId = await _getStableUserId();
     if (!mounted) return;
     Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => MainScreen(nickname: nickname, roomCode: roomCode, userId: userId, vehicleType: _vehicleType)));
   }
