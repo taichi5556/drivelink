@@ -1207,7 +1207,7 @@ class _MainScreenState extends State<MainScreen> {
             ),
             // 右: サイドパネル
             Container(
-              width: 180,
+              width: 320,
               color: const Color(0xFF0D1B2A),
               child: Column(
                 children: [
@@ -1256,9 +1256,7 @@ class _MainScreenState extends State<MainScreen> {
   }
 
   Widget _buildMap() {
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(8),
-      child: GoogleMap(
+    return GoogleMap(
         initialCameraPosition: CameraPosition(target: _myPosition, zoom: 15),
         markers: _markers,
         polylines: _polylines,
@@ -1276,6 +1274,7 @@ class _MainScreenState extends State<MainScreen> {
         myLocationEnabled: false,
         myLocationButtonEnabled: false,
         zoomControlsEnabled: false,
+        padding: EdgeInsets.zero,
         onLongPress: (latLng) async {
           final result = await showDialog<String>(
             context: context,
@@ -1332,7 +1331,6 @@ class _MainScreenState extends State<MainScreen> {
             }
           }
         },
-      ),
     );
   }
 

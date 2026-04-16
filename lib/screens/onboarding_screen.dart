@@ -103,17 +103,6 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
             ),
           ),
         ),
-        Positioned(
-          bottom: -60, right: -40,
-          child: Container(
-            width: 220, height: 220,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: const Color(0xFF0057FF).withValues(alpha: 0.08),
-            ),
-          ),
-        ),
-
         SafeArea(
           child: Column(children: [
             // スキップボタン

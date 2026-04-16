@@ -130,6 +130,8 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
     }
     setState(() => _isLoading = true);
     try {
+      // Android 14以降: DB操作前に匿名認証を完了させる
+      await _getStableUserId();
       final roomCode = _generateRoomCode();
       final expiresAt = DateTime.now().millisecondsSinceEpoch + (_selectedHours * 3600 * 1000);
       final db = FirebaseDatabase.instanceFor(
@@ -158,6 +160,8 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
     if (roomCode.isEmpty) { ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(_emptyRoom))); return; }
     setState(() => _isLoading = true);
     try {
+      // Android 14以降: DB操作前に匿名認証を完了させる
+      final userId = await _getStableUserId();
       final db = FirebaseDatabase.instanceFor(
         app: Firebase.app(),
         databaseURL: 'https://drivelink-a7ffb-default-rtdb.asia-southeast1.firebasedatabase.app',
@@ -180,7 +184,6 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
         setState(() => _isLoading = false);
         return;
       }
-      final userId = await _getStableUserId();
       await db.ref('rooms/$roomCode/members/$userId').update({
         'nickname': nickname, 'vehicle_type': _vehicleType,
       });
@@ -540,8 +543,6 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
       body: Stack(children: [
         Positioned(top: -80, left: -60, child: Container(width: 280, height: 280,
           decoration: BoxDecoration(shape: BoxShape.circle, color: const Color(0xFF00D4FF).withOpacity(0.07)))),
-        Positioned(bottom: -60, right: -40, child: Container(width: 220, height: 220,
-          decoration: BoxDecoration(shape: BoxShape.circle, color: const Color(0xFF0057FF).withOpacity(0.08)))),
         SafeArea(child: FadeTransition(opacity: _fadeAnim, child: Column(children: [
           Expanded(child: SingleChildScrollView(
           padding: const EdgeInsets.symmetric(horizontal: 24),
