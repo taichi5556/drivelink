@@ -37,11 +37,11 @@ class MainScreen extends StatefulWidget {
   State<MainScreen> createState() => _MainScreenState();
 }
 
-class _MainScreenState extends State<MainScreen> {
+class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   GoogleMapController? _mapController;
   bool _isFollowingMember = false;
   late bool _shareLocation;
-  bool _programmaticCameraMove = false;
+  int _programmaticCameraMove = 0;
   Set<Marker> _markers = {};
   LatLng _myPosition = const LatLng(35.6812, 139.7671);
   Timer? _expiryTimer;
@@ -73,6 +73,16 @@ class _MainScreenState extends State<MainScreen> {
   StreamSubscription? _warningsSubscription;
   Timer? _warningCleanupTimer;
 
+  // ヘディングアップ
+  bool _headingUp = false;
+  double _currentBearing = 0.0;
+  double _currentZoom = 17.0;
+  Timer? _routeOverviewTimer;
+  bool _inRouteOverview = false;
+
+  // 通過済みルート
+  List<LatLng> _routePoints = [];
+
   // 車両マーカーキャッシュ（vehicleType-isMe → BitmapDescriptor）
   final Map<String, BitmapDescriptor> _markerCache = {};
 
@@ -90,10 +100,20 @@ class _MainScreenState extends State<MainScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _shareLocation = false;
     WakelockPlus.enable();
     _initAll();
     _loadBannerAd();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _locationSubscription?.cancel();
+      _startLocationStream();
+      _updateLocation();
+    }
   }
 
   Future<void> _initAll() async {
@@ -347,6 +367,7 @@ class _MainScreenState extends State<MainScreen> {
           _groupDestName = name;
         });
         _updateDestinationMarker();
+        _saveDestHistory(name, lat, lng);
       }
     });
   }
@@ -518,6 +539,7 @@ class _MainScreenState extends State<MainScreen> {
     for (final entry in _members.entries) {
       final uid = entry.key;
       final m = entry.value as Map;
+      if (m['lat'] == null || m['lng'] == null) continue;
       final lat = (m['lat'] as num).toDouble();
       final lng = (m['lng'] as num).toDouble();
       final nick = m['nickname'] as String? ?? '';
@@ -570,12 +592,19 @@ class _MainScreenState extends State<MainScreen> {
     if (dest != null) {
       _fetchRoute(dest);
     } else {
-      setState(() => _polylines = {});
+      _inRouteOverview = false;
+      _routeOverviewTimer?.cancel();
+      setState(() {
+        _polylines = {};
+        _routePoints = [];
+        _headingUp = false;
+      });
+      _animateCameraWithBearing(_myPosition, 0);
     }
     _rebuildMarkers();
   }
 
-  Future<void> _fetchRoute(LatLng dest) async {
+  Future<void> _fetchRoute(LatLng dest, {bool isRerouting = false}) async {
     const apiKey = 'AIzaSyChuUZypiVhojgCO6ZgZML-ZW3eYLtti5c';
     try {
       final origin = '${_myPosition.latitude},${_myPosition.longitude}';
@@ -598,7 +627,13 @@ class _MainScreenState extends State<MainScreen> {
             allCoords.addAll(points.map((p) => LatLng(p.latitude, p.longitude)));
           }
           if (allCoords.isNotEmpty && mounted) {
+            _routePoints = allCoords;
             setState(() {
+              // 再検索時はヘディングアップ・追跡状態を変更しない
+              if (!isRerouting) {
+                _headingUp = true;
+                _isFollowingMember = false;
+              }
               _polylines = {
                 Polyline(
                   polylineId: const PolylineId('route'),
@@ -608,10 +643,42 @@ class _MainScreenState extends State<MainScreen> {
                 ),
               };
             });
-            _animateCamera(
-              CameraUpdate.newLatLngZoom(_myPosition, 14),
-              programmatic: true,
-            );
+            _updatePassedRoute();
+            if (!isRerouting) {
+              // 前回のタイマーをキャンセル（5秒以内の再設定時の競合防止）
+              _routeOverviewTimer?.cancel();
+              // 縮退チェック（現在地と目的地が同じ場合は概観スキップ）
+              final isSamePoint = (_myPosition.latitude - dest.latitude).abs() < 0.00001 &&
+                  (_myPosition.longitude - dest.longitude).abs() < 0.00001;
+              if (isSamePoint) {
+                _animateCamera(CameraUpdate.newLatLngZoom(_myPosition, 17.0), programmatic: true);
+              } else {
+                // 現在地と目的地が両方見えるようズームアウト
+                final bounds = LatLngBounds(
+                  southwest: LatLng(
+                    min(_myPosition.latitude, dest.latitude),
+                    min(_myPosition.longitude, dest.longitude),
+                  ),
+                  northeast: LatLng(
+                    max(_myPosition.latitude, dest.latitude),
+                    max(_myPosition.longitude, dest.longitude),
+                  ),
+                );
+                _inRouteOverview = true;
+                _animateCamera(CameraUpdate.newLatLngBounds(bounds, 80), programmatic: true);
+                // 5秒後に通常ズームへ自動復帰
+                _routeOverviewTimer = Timer(const Duration(seconds: 5), () {
+                  if (!mounted || _routePoints.isEmpty) return;
+                  _inRouteOverview = false;
+                  _currentZoom = 17.0;
+                  if (_headingUp) {
+                    _moveCameraWithBearing(_myPosition, _currentBearing);
+                  } else {
+                    _animateCamera(CameraUpdate.newLatLngZoom(_myPosition, 17.0), programmatic: true);
+                  }
+                });
+              }
+            }
           }
         }
       } finally {
@@ -668,6 +735,7 @@ class _MainScreenState extends State<MainScreen> {
       Navigator.pop(ctx);
     }
 
+    if (!mounted) return;
     await showDialog(
       context: context,
       barrierDismissible: true,
@@ -820,6 +888,7 @@ class _MainScreenState extends State<MainScreen> {
       'name': name,
       'senderUid': widget.userId,
       'senderNick': widget.nickname,
+      'shared_at': DateTime.now().millisecondsSinceEpoch,
     });
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -876,6 +945,10 @@ class _MainScreenState extends State<MainScreen> {
     ).listen((pos) async {
       if (!mounted) return;
       setState(() => _myPosition = LatLng(pos.latitude, pos.longitude));
+      // 速度が十分な場合のみbearingを更新（停車中の誤検知を防ぐ）
+      if (pos.speed > 0.5 && pos.heading >= 0) {
+        _currentBearing = pos.heading;
+      }
       if (_shareLocation) {
         await _db.child('rooms/${widget.roomCode}/members/${widget.userId}').update({
           'nickname': widget.nickname,
@@ -886,10 +959,16 @@ class _MainScreenState extends State<MainScreen> {
         });
       }
       if (!mounted) return;
-      if (!_isFollowingMember && !_programmaticCameraMove) {
-        _animateCamera(CameraUpdate.newLatLng(_myPosition), programmatic: true);
+      if (!_inRouteOverview) {
+        if (_headingUp) {
+          // ヘディングアップ時は_isFollowingMemberに関わらず常に追従
+          _moveCameraWithBearing(_myPosition, _currentBearing);
+        } else if (!_isFollowingMember && _programmaticCameraMove == 0) {
+          _animateCamera(CameraUpdate.newLatLng(_myPosition), programmatic: true);
+        }
       }
       _checkRouteDeviation();
+      _updatePassedRoute();
     }, onError: (e) {
       debugPrint('位置情報ストリームエラー: $e');
     });
@@ -922,11 +1001,12 @@ class _MainScreenState extends State<MainScreen> {
         });
       }
       if (!mounted) return;
-      if (!_isFollowingMember && !_programmaticCameraMove) {
-        _animateCamera(
-          CameraUpdate.newLatLng(_myPosition),
-          programmatic: true,
-        );
+      if (!_inRouteOverview) {
+        if (_headingUp) {
+          _moveCameraWithBearing(_myPosition, _currentBearing);
+        } else if (!_isFollowingMember && _programmaticCameraMove == 0) {
+          _animateCamera(CameraUpdate.newLatLngZoom(_myPosition, 17.0), programmatic: true);
+        }
       }
       // ルート逸脱チェック
       _checkRouteDeviation();
@@ -938,22 +1018,23 @@ class _MainScreenState extends State<MainScreen> {
   }
 
   void _checkRouteDeviation() {
-    if (_polylines.isEmpty || _groupDestination == null) return;
+    if (_routePoints.isEmpty || _groupDestination == null) return;
 
     // クールダウン中はスキップ
     final now = DateTime.now();
     if (_lastRerouteTime != null &&
-        now.difference(_lastRerouteTime!).inSeconds < _rerouteCooldownSecs) return;
+        now.difference(_lastRerouteTime!).inSeconds < _rerouteCooldownSecs) {
+      return;
+    }
 
-    // ポリラインの全点を抽出
-    final points = _polylines.first.points;
+    final points = _routePoints;
     if (points.isEmpty) return;
 
     final dist = _distanceToPolyline(_myPosition, points);
     if (dist > _rerouteThresholdMeters) {
       _lastRerouteTime = now;
       debugPrint('ルート逸脱検知: ${dist.toStringAsFixed(0)}m → 再検索');
-      _fetchRoute(_groupDestination!);
+      _fetchRoute(_groupDestination!, isRerouting: true);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
@@ -1006,9 +1087,63 @@ class _MainScreenState extends State<MainScreen> {
   void _animateCamera(CameraUpdate update, {required bool programmatic}) {
     if (_mapController == null) return;
     if (programmatic) {
-      _programmaticCameraMove = true;
+      _programmaticCameraMove++;
     }
     _mapController!.animateCamera(update);
+  }
+
+  void _animateCameraWithBearing(LatLng target, double bearing) {
+    if (_mapController == null) return;
+    _programmaticCameraMove++;
+    _mapController!.animateCamera(
+      CameraUpdate.newCameraPosition(
+        CameraPosition(target: target, bearing: bearing, zoom: _currentZoom, tilt: 0),
+      ),
+    );
+  }
+
+  // GPS追従用：即時移動（animateCameraと異なりonCameraMoveStartedを発生させない）
+  void _moveCameraWithBearing(LatLng target, double bearing) {
+    if (_mapController == null) return;
+    _mapController!.moveCamera(
+      CameraUpdate.newCameraPosition(
+        CameraPosition(target: target, bearing: bearing, zoom: _currentZoom, tilt: 0),
+      ),
+    );
+  }
+
+  void _updatePassedRoute() {
+    if (_routePoints.isEmpty || !mounted) return;
+    // 現在地から最も近いルート点のインデックスを検索
+    int closestIdx = 0;
+    double minDist = double.infinity;
+    for (int i = 0; i < _routePoints.length; i++) {
+      final d = _metersTo(_myPosition, _routePoints[i]);
+      if (d < minDist) {
+        minDist = d;
+        closestIdx = i;
+      }
+    }
+    final passed = _routePoints.sublist(0, closestIdx + 1);
+    final remaining = _routePoints.sublist(closestIdx);
+    final newPolylines = <Polyline>{};
+    if (passed.length >= 2) {
+      newPolylines.add(Polyline(
+        polylineId: const PolylineId('route_passed'),
+        points: passed,
+        color: Colors.grey.withValues(alpha: 0.35),
+        width: 5,
+      ));
+    }
+    if (remaining.length >= 2) {
+      newPolylines.add(Polyline(
+        polylineId: const PolylineId('route'),
+        points: remaining,
+        color: const Color(0xFF1565C0),
+        width: 5,
+      ));
+    }
+    setState(() => _polylines = newPolylines);
   }
 
 
@@ -1019,10 +1154,12 @@ class _MainScreenState extends State<MainScreen> {
     _countdownTimer?.cancel();
     _expiryTimer?.cancel();
     _warningCleanupTimer?.cancel();
+    _routeOverviewTimer?.cancel();
     _membersSubscription?.cancel();
     _destSubscription?.cancel();
     _warningsSubscription?.cancel();
     _appLinkSubscription?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
     _db.child('rooms/${widget.roomCode}/members/${widget.userId}').remove();
     _bannerAd?.dispose();
     super.dispose();
@@ -1097,7 +1234,7 @@ class _MainScreenState extends State<MainScreen> {
 
   void _shareRoomCode() {
     final link = 'https://drivelink-a7ffb.web.app/join?room=${widget.roomCode}';
-    Share.share('TouriLinkで一緒にツーリングしよう！\nリンクをタップしてルームに参加👇\n$link\n\nリンクが使えない場合はルームコード: ${widget.roomCode}');
+    SharePlus.instance.share(ShareParams(text: 'TouriLinkで一緒にツーリングしよう！\nリンクをタップしてルームに参加👇\n$link\n\nリンクが使えない場合はルームコード: ${widget.roomCode}'));
   }
 
   // 縦向きレイアウト
@@ -1131,7 +1268,7 @@ class _MainScreenState extends State<MainScreen> {
               ),
               Switch(
                 value: _shareLocation,
-                activeColor: Colors.green,
+                activeThumbColor: Colors.green,
                 inactiveThumbColor: Colors.grey,
                 materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
                 onChanged: (_) => _toggleLocationSharing(),
@@ -1256,20 +1393,25 @@ class _MainScreenState extends State<MainScreen> {
   }
 
   Widget _buildMap() {
-    return GoogleMap(
-        initialCameraPosition: CameraPosition(target: _myPosition, zoom: 15),
+    return Stack(
+      children: [
+        GoogleMap(
+        initialCameraPosition: CameraPosition(target: _myPosition, zoom: 17),
         markers: _markers,
         polylines: _polylines,
         onMapCreated: (c) => _mapController = c,
+        onCameraMove: (position) {
+          _currentZoom = position.zoom;
+        },
         onCameraMoveStarted: () {
-          if (_programmaticCameraMove) {
-            _programmaticCameraMove = false;
+          if (_programmaticCameraMove > 0) {
+            _programmaticCameraMove--;
             return;
           }
           setState(() => _isFollowingMember = true);
         },
         onCameraIdle: () {
-          _programmaticCameraMove = false;
+          _programmaticCameraMove = 0;
         },
         myLocationEnabled: false,
         myLocationButtonEnabled: false,
@@ -1331,6 +1473,43 @@ class _MainScreenState extends State<MainScreen> {
             }
           }
         },
+        ),
+        // ヘディングアップ ON/OFF ボタン
+        Positioned(
+          right: 12,
+          bottom: 12,
+          child: GestureDetector(
+            onTap: () {
+              final newVal = !_headingUp;
+              setState(() {
+                _headingUp = newVal;
+                if (newVal) _isFollowingMember = false;
+              });
+              if (newVal) {
+                _animateCameraWithBearing(_myPosition, _currentBearing);
+              } else {
+                _animateCameraWithBearing(_myPosition, 0);
+              }
+            },
+            child: Container(
+              width: 44,
+              height: 44,
+              decoration: BoxDecoration(
+                color: _headingUp
+                    ? const Color(0xFF00D4FF)
+                    : const Color(0xFF1A3A5C).withValues(alpha: 0.9),
+                shape: BoxShape.circle,
+                boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 4)],
+              ),
+              child: Icon(
+                Icons.navigation,
+                color: _headingUp ? Colors.white : Colors.white70,
+                size: 24,
+              ),
+            ),
+          ),
+        ),
+      ],
     );
   }
 
@@ -1393,7 +1572,10 @@ class _MainScreenState extends State<MainScreen> {
                       _groupDestination = null;
                       _groupDestName = '';
                       _polylines = {};
+                      _routePoints = [];
+                      _headingUp = false;
                     });
+                    _animateCameraWithBearing(_myPosition, 0);
                     _updateDestinationMarker();
                   }
                 : _setPersonalDestination,
@@ -1404,7 +1586,7 @@ class _MainScreenState extends State<MainScreen> {
             color: const Color(0xFF1A3A5C),
             onTap: () {
               setState(() => _isFollowingMember = false);
-              _animateCamera(CameraUpdate.newLatLngZoom(_myPosition, 15.5), programmatic: true);
+              _animateCamera(CameraUpdate.newLatLngZoom(_myPosition, 17.0), programmatic: true);
             },
           ),
           _buildActionBtn(
@@ -1480,6 +1662,7 @@ class _MainScreenState extends State<MainScreen> {
       itemBuilder: (context, index) {
         final uid = uids[index];
         final m = _members[uid] as Map;
+        if (m['lat'] == null || m['lng'] == null) return const SizedBox.shrink();
         final nick = m['nickname'] as String? ?? '?';
         final lat = (m['lat'] as num).toDouble();
         final lng = (m['lng'] as num).toDouble();
@@ -1520,6 +1703,7 @@ class _MainScreenState extends State<MainScreen> {
         itemBuilder: (context, index) {
           final uid = uids[index];
           final m = _members[uid] as Map;
+          if (m['lat'] == null || m['lng'] == null) return const SizedBox.shrink();
           final nick = m['nickname'] as String? ?? '?';
           final lat = (m['lat'] as num).toDouble();
           final lng = (m['lng'] as num).toDouble();

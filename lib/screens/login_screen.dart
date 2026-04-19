@@ -52,8 +52,6 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
   }
 
   String get _nickLabel => _isJapanese ? 'ニックネーム' : 'Nickname';
-  String get _roomLabel => _isJapanese ? 'ルームコード' : 'Room Code';
-  String get _startLabel => _isJapanese ? 'ドライブ開始！' : 'Start Drive!';
   String get _emptyNick => _isJapanese ? 'ニックネームを入力してください' : 'Please enter a nickname';
   String get _emptyRoom => _isJapanese ? 'ルームコードを入力してください' : 'Please enter a room code';
 
@@ -124,6 +122,7 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
   Future<void> _createRoom() async {
     final nickname = _nicknameController.text.trim();
     await _saveNickname(nickname);
+    if (!mounted) return;
     if (nickname.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(_emptyNick)));
       return;
@@ -155,6 +154,7 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
   Future<void> _enterRoom() async {
     final nickname = _nicknameController.text.trim();
     await _saveNickname(nickname);
+    if (!mounted) return;
     final roomCode = _roomController.text.trim().toUpperCase();
     if (nickname.isEmpty) { ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(_emptyNick))); return; }
     if (roomCode.isEmpty) { ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(_emptyRoom))); return; }
@@ -207,9 +207,9 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
 
   void _shareRoomCode(String code) {
     final link = 'https://drivelink-a7ffb.web.app/join?room=$code';
-    Share.share(_isJapanese
+    SharePlus.instance.share(ShareParams(text: _isJapanese
         ? 'TouriLinkで一緒にツーリングしよう！\nリンクをタップしてルームに参加👇\n$link\n\nリンクが使えない場合はルームコード: $code'
-        : 'Join me on TouriLink!\nTap the link to join👇\n$link\n\nRoom Code: $code');
+        : 'Join me on TouriLink!\nTap the link to join👇\n$link\n\nRoom Code: $code'));
   }
 
   void _copyRoomCode(String code) {
@@ -421,8 +421,8 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
           border: Border.all(
             color: value
                 ? (isWarning
-                    ? const Color(0xFFFF6B35).withOpacity(0.7)
-                    : const Color(0xFF00D4FF).withOpacity(0.7))
+                    ? const Color(0xFFFF6B35).withValues(alpha: 0.7)
+                    : const Color(0xFF00D4FF).withValues(alpha: 0.7))
                 : const Color(0xFF1E3A5F),
             width: value ? 1.5 : 1.0,
           ),
@@ -432,7 +432,7 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
                     color: (isWarning
                             ? const Color(0xFFFF6B35)
                             : const Color(0xFF00D4FF))
-                        .withOpacity(0.08),
+                        .withValues(alpha: 0.08),
                     blurRadius: 10,
                     spreadRadius: 1,
                   )
@@ -446,7 +446,7 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
               height: 32,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
-                color: iconColor.withOpacity(0.12),
+                color: iconColor.withValues(alpha: 0.12),
               ),
               child: Icon(icon, color: iconColor, size: 17),
             ),
@@ -525,7 +525,7 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
           gradient: onTap == null
               ? const LinearGradient(colors: [Color(0xFF334455), Color(0xFF334455)])
               : const LinearGradient(colors: [Color(0xFF00D4FF), Color(0xFF0057FF)], begin: Alignment.centerLeft, end: Alignment.centerRight),
-          boxShadow: onTap == null ? [] : [BoxShadow(color: const Color(0xFF00D4FF).withOpacity(0.35), blurRadius: 20, offset: const Offset(0, 6))],
+          boxShadow: onTap == null ? [] : [BoxShadow(color: const Color(0xFF00D4FF).withValues(alpha: 0.35), blurRadius: 20, offset: const Offset(0, 6))],
         ),
         child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
           Icon(icon, color: Colors.white, size: 22),
@@ -542,7 +542,7 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
       backgroundColor: const Color(0xFF070D1A),
       body: Stack(children: [
         Positioned(top: -80, left: -60, child: Container(width: 280, height: 280,
-          decoration: BoxDecoration(shape: BoxShape.circle, color: const Color(0xFF00D4FF).withOpacity(0.07)))),
+          decoration: BoxDecoration(shape: BoxShape.circle, color: const Color(0xFF00D4FF).withValues(alpha: 0.07)))),
         SafeArea(child: FadeTransition(opacity: _fadeAnim, child: Column(children: [
           Expanded(child: SingleChildScrollView(
           padding: const EdgeInsets.symmetric(horizontal: 24),
@@ -612,7 +612,7 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
                                 color: selected ? const Color(0xFF00D4FF) : const Color(0xFF1E3A5F),
                                 width: selected ? 2 : 1,
                               ),
-                              boxShadow: selected ? [BoxShadow(color: const Color(0xFF00D4FF).withOpacity(0.3), blurRadius: 10)] : [],
+                              boxShadow: selected ? [BoxShadow(color: const Color(0xFF00D4FF).withValues(alpha: 0.3), blurRadius: 10)] : [],
                             ),
                             child: Text(
                               '${h}h',
