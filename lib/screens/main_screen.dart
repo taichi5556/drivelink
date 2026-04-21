@@ -901,16 +901,19 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     _membersSubscription = _db
         .child('rooms/${widget.roomCode}/members')
         .onValue
-        .listen((event) {
-      final data = event.snapshot.value as Map?;
-      if (data == null) return;
-      final updated = <String, dynamic>{};
-      data.forEach((k, v) => updated[k.toString()] = v);
-      if (mounted) {
-        setState(() => _members = updated);
-        _rebuildMarkers();
-      }
-    });
+        .listen(
+      (event) {
+        final data = event.snapshot.value as Map?;
+        if (data == null) return;
+        final updated = <String, dynamic>{};
+        data.forEach((k, v) => updated[k.toString()] = v);
+        if (mounted) {
+          setState(() => _members = updated);
+          _rebuildMarkers();
+        }
+      },
+      onError: (e) => debugPrint('members リスナーエラー: $e'),
+    );
   }
 
   LocationSettings _buildLocationSettings() {

@@ -202,6 +202,15 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
     final roomCode = _createdRoomCode!;
     final userId = await _getStableUserId();
     if (!mounted) return;
+    final db = FirebaseDatabase.instanceFor(
+      app: Firebase.app(),
+      databaseURL: 'https://drivelink-a7ffb-default-rtdb.asia-southeast1.firebasedatabase.app',
+    );
+    await db.ref('rooms/$roomCode/members/$userId').update({
+      'nickname': nickname,
+      'vehicle_type': _vehicleType,
+    });
+    if (!mounted) return;
     Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => MainScreen(nickname: nickname, roomCode: roomCode, userId: userId, vehicleType: _vehicleType)));
   }
 
