@@ -1556,67 +1556,82 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   Widget _buildActionButtons() {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
-      child: Wrap(
-        alignment: WrapAlignment.center,
-        spacing: 8,
-        runSpacing: 6,
-        children: [
-          _buildActionBtn(
-            icon: _polylines.isNotEmpty ? Icons.stop : Icons.place,
-            label: _polylines.isNotEmpty ? 'ルート終了' : '目的地',
-            color: _polylines.isNotEmpty
-                ? Colors.redAccent
-                : _groupDestination != null
-                    ? const Color(0xFF1E90FF)
-                    : const Color(0xFF1A3A5C),
-            onTap: _polylines.isNotEmpty
-                ? () {
-                    setState(() {
-                      _groupDestination = null;
-                      _groupDestName = '';
-                      _polylines = {};
-                      _routePoints = [];
-                      _headingUp = false;
-                    });
-                    _animateCameraWithBearing(_myPosition, 0);
-                    _updateDestinationMarker();
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          const int buttonCount = 4; // 5ボタンに増やす時はここだけ変える
+          const double spacing = 8.0;
+          final double btnWidth =
+              ((constraints.maxWidth - spacing * (buttonCount - 1)) / buttonCount)
+                  .clamp(60.0, 100.0);
+
+          return Row(
+            mainAxisAlignment: MainAxisAlignment.start,
+            children: [
+              _buildActionBtn(
+                icon: _polylines.isNotEmpty ? Icons.stop : Icons.place,
+                label: _polylines.isNotEmpty ? '案内終了' : '目的地',
+                color: _polylines.isNotEmpty
+                    ? Colors.redAccent
+                    : _groupDestination != null
+                        ? const Color(0xFF1E90FF)
+                        : const Color(0xFF1A3A5C),
+                onTap: _polylines.isNotEmpty
+                    ? () {
+                        setState(() {
+                          _groupDestination = null;
+                          _groupDestName = '';
+                          _polylines = {};
+                          _routePoints = [];
+                          _headingUp = false;
+                        });
+                        _animateCameraWithBearing(_myPosition, 0);
+                        _updateDestinationMarker();
+                      }
+                    : _setPersonalDestination,
+                width: btnWidth,
+              ),
+              const SizedBox(width: spacing),
+              _buildActionBtn(
+                icon: Icons.my_location,
+                label: '現在地',
+                color: const Color(0xFF1A3A5C),
+                onTap: () {
+                  setState(() => _isFollowingMember = false);
+                  _animateCamera(CameraUpdate.newLatLngZoom(_myPosition, 17.0), programmatic: true);
+                },
+                width: btnWidth,
+              ),
+              const SizedBox(width: spacing),
+              _buildActionBtn(
+                icon: Icons.share,
+                label: 'ルート共有',
+                color: _groupDestination != null
+                    ? const Color(0xFF00D4FF)
+                    : Colors.grey.shade800,
+                onTap: _groupDestination != null ? _shareGroupDestination : null,
+                width: btnWidth,
+              ),
+              const SizedBox(width: spacing),
+              _buildActionBtn(
+                icon: Icons.warning_amber_rounded,
+                label: '速度注意',
+                color: const Color(0xFFB71C1C),
+                onTap: () async {
+                  await _addWarning(_myPosition);
+                  if (mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text('！ 注意喚起を報告しました（30分間表示）'),
+                        backgroundColor: Color(0xFF1A3A5C),
+                      ),
+                    );
                   }
-                : _setPersonalDestination,
-          ),
-          _buildActionBtn(
-            icon: Icons.my_location,
-            label: '現在地',
-            color: const Color(0xFF1A3A5C),
-            onTap: () {
-              setState(() => _isFollowingMember = false);
-              _animateCamera(CameraUpdate.newLatLngZoom(_myPosition, 17.0), programmatic: true);
-            },
-          ),
-          _buildActionBtn(
-            icon: Icons.share,
-            label: 'ルート共有',
-            color: _groupDestination != null
-                ? const Color(0xFF00D4FF)
-                : Colors.grey.shade800,
-            onTap: _groupDestination != null ? _shareGroupDestination : null,
-          ),
-          _buildActionBtn(
-            icon: Icons.warning_amber_rounded,
-            label: '注意喚起',
-            color: const Color(0xFFB71C1C),
-            onTap: () async {
-              await _addWarning(_myPosition);
-              if (mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                    content: Text('！ 注意喚起を報告しました（30分間表示）'),
-                    backgroundColor: Color(0xFF1A3A5C),
-                  ),
-                );
-              }
-            },
-          ),
-        ],
+                },
+                width: btnWidth,
+              ),
+            ],
+          );
+        },
       ),
     );
   }
@@ -1626,11 +1641,13 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     required String label,
     required Color color,
     VoidCallback? onTap,
+    double? width,
   }) {
     return GestureDetector(
       onTap: onTap,
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        width: width,
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
         decoration: BoxDecoration(
           color: color,
           borderRadius: BorderRadius.circular(12),
@@ -1640,7 +1657,13 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
           children: [
             Icon(icon, color: Colors.white, size: 22),
             const SizedBox(height: 2),
-            Text(label, textAlign: TextAlign.center, style: const TextStyle(color: Colors.white, fontSize: 10)),
+            Text(
+              label,
+              textAlign: TextAlign.center,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(color: Colors.white, fontSize: 10),
+            ),
           ],
         ),
       ),
