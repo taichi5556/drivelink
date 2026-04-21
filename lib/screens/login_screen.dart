@@ -11,12 +11,16 @@ import 'package:app_links/app_links.dart';
 import 'dart:async';
 
 class LoginScreen extends StatefulWidget {
+  static String lastProcessedCode = '';
   const LoginScreen({super.key});
   @override
   State<LoginScreen> createState() => _LoginScreenState();
 }
 
-class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin {
+class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin, WidgetsBindingObserver {
+  // 同一セッション内で getInitialLink を1回だけ消費するフラグ
+  static bool _initialLinkConsumed = false;
+
   final _nicknameController = TextEditingController();
   final _roomController = TextEditingController();
   bool _isLoading = false;
@@ -25,6 +29,8 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
   late AnimationController _fadeController;
   late Animation<double> _fadeAnim;
   StreamSubscription? _linkSub;
+  static bool _appWasInBackground = false;
+  static Timer? _backgroundFlagTimer;
   bool _consentLocation = false;
   bool _consentDriving  = false;
   String _vehicleType = 'car'; // 'car' or 'bike'
@@ -34,6 +40,7 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _initDeepLink();
     _loadNickname();
     _fadeController = AnimationController(duration: const Duration(milliseconds: 1000), vsync: this);
@@ -44,6 +51,8 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _backgroundFlagTimer?.cancel();
     _nicknameController.dispose();
     _linkSub?.cancel();
     _roomController.dispose();
@@ -51,32 +60,53 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
     super.dispose();
   }
 
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused) {
+      _backgroundFlagTimer?.cancel();
+      _appWasInBackground = true;
+    } else if (state == AppLifecycleState.resumed) {
+      _backgroundFlagTimer?.cancel();
+      _backgroundFlagTimer = Timer(const Duration(seconds: 3), () {
+        _appWasInBackground = false;
+      });
+    }
+  }
+
   String get _nickLabel => _isJapanese ? 'ニックネーム' : 'Nickname';
   String get _emptyNick => _isJapanese ? 'ニックネームを入力してください' : 'Please enter a nickname';
   String get _emptyRoom => _isJapanese ? 'ルームコードを入力してください' : 'Please enter a room code';
 
   Future<void> _initDeepLink() async {
-    // 起動時のリンクを処理
-    try {
-      final appLinks = AppLinks();
-      final uri = await appLinks.getInitialLink();
-      if (uri != null && uri.scheme == 'drivevoice' && uri.host == 'join') {
-        final code = uri.queryParameters['room'] ?? '';
-        if (code.isNotEmpty && mounted) {
-          setState(() {
-            _roomController.text = code;
-          });
+    if (!_initialLinkConsumed) {
+      _initialLinkConsumed = true;
+      try {
+        final appLinks = AppLinks();
+        final uri = await appLinks.getInitialLink();
+        if (uri != null && uri.scheme == 'drivevoice' && uri.host == 'join') {
+          final code = uri.queryParameters['room'] ?? '';
+          if (code.isNotEmpty && mounted) {
+            if (!(code == LoginScreen.lastProcessedCode && !_appWasInBackground)) {
+              LoginScreen.lastProcessedCode = code;
+              setState(() {
+                _roomController.text = code;
+              });
+            }
+          }
         }
+      } catch (e) {
+        debugPrint('deeplink init error: $e');
       }
-    } catch (e) {
-      debugPrint('deeplink init error: $e');
     }
-    // 起動中のリンクを監視
     final appLinks2 = AppLinks();
     _linkSub = appLinks2.uriLinkStream.listen((uri) {
       if (uri.scheme == 'drivevoice' && uri.host == 'join') {
         final code = uri.queryParameters['room'] ?? '';
+        if (code == LoginScreen.lastProcessedCode && !_appWasInBackground) return;
         if (code.isNotEmpty && mounted) {
+          LoginScreen.lastProcessedCode = code;
+          _appWasInBackground = false;
+          _backgroundFlagTimer?.cancel();
           setState(() {
             _roomController.text = code;
           });
@@ -583,6 +613,7 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
             const SizedBox(height: 8),
             if (_createdRoomCode == null) ...[
               const SizedBox(height: 8),
+              if (_roomController.text.isEmpty)
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
                 decoration: BoxDecoration(

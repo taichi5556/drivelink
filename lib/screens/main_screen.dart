@@ -73,6 +73,21 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   StreamSubscription? _warningsSubscription;
   Timer? _warningCleanupTimer;
 
+  // 通知関連
+  int _joinedAt = 0;
+  StreamSubscription? _notificationsSubscription;
+  final Map<String, Map<String, dynamic>> _pendingNotifications = {};
+  final Set<String> _confirmedNotificationIds = {};
+  final Map<String, Timer> _notificationHideTimers = {};
+  final Map<String, Timer> _notificationRetryTimers = {};
+  Timer? _blinkTimer;
+  bool _blinkVisible = false;
+  Color _blinkColor = Colors.transparent;
+  Timer? _senderBlinkTimer;
+  Timer? _senderAutoStopTimer;
+  bool _senderBlinkVisible = false;
+  Color _senderBlinkColor = Colors.transparent;
+
   // ヘディングアップ
   bool _headingUp = false;
   double _currentBearing = 0.0;
@@ -127,6 +142,9 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     _listenToMembers();
     _listenToDestination();
     _listenToWarnings();
+    _joinedAt = DateTime.now().millisecondsSinceEpoch;
+    await _cleanupExpiredNotifications();
+    _listenToNotifications();
     _initAppLinks();
     await _startExpiryCheck();
     // 期限切れ警告ポイントを1分ごとに削除
@@ -426,6 +444,244 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       await _db.child('rooms/${widget.roomCode}/warnings').update(updates);
     }
   }
+
+  // ── 通知機能 ─────────────────────────────────────────────────────
+
+  Future<void> _cleanupExpiredNotifications() async {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final snapshot = await _db.child('rooms/${widget.roomCode}/notifications').get();
+    final data = snapshot.value as Map?;
+    if (data == null) return;
+    final updates = <String, dynamic>{};
+    data.forEach((k, v) {
+      final n = v as Map;
+      final expiresAt = (n['expires_at'] as num?)?.toInt() ?? 0;
+      if (expiresAt <= now) updates['$k'] = null;
+    });
+    if (updates.isNotEmpty) {
+      await _db.child('rooms/${widget.roomCode}/notifications').update(updates);
+    }
+  }
+
+  void _listenToNotifications() {
+    _notificationsSubscription = _db
+        .child('rooms/${widget.roomCode}/notifications')
+        .onValue
+        .listen(
+      (event) {
+        final now = DateTime.now().millisecondsSinceEpoch;
+        final data = event.snapshot.value as Map?;
+        if (data == null) return;
+        data.forEach((k, v) {
+          final id = k.toString();
+          final notification = Map<String, dynamic>.from(v as Map);
+          final expiresAt = (notification['expires_at'] as num?)?.toInt() ?? 0;
+          final createdAt = (notification['created_at'] as num?)?.toInt() ?? 0;
+          final senderUid = notification['senderUid'] as String? ?? '';
+          if (expiresAt <= now) return;
+          if (createdAt <= _joinedAt) return;
+          if (senderUid == widget.userId) return;
+          if (_confirmedNotificationIds.contains(id)) return;
+          if (_pendingNotifications.containsKey(id)) return;
+          if (_notificationHideTimers.containsKey(id)) return;
+          if (_notificationRetryTimers.containsKey(id)) return;
+          _showNotification(id, notification);
+        });
+      },
+      onError: (e) => debugPrint('notifications リスナーエラー: $e'),
+    );
+  }
+
+  void _showNotification(String id, Map<String, dynamic> notification) {
+    if (_confirmedNotificationIds.contains(id)) return;
+    if (_pendingNotifications.containsKey(id)) return;
+    setState(() => _pendingNotifications[id] = notification);
+    _updateBlinking();
+
+    _notificationHideTimers[id] = Timer(const Duration(seconds: 30), () {
+      if (!mounted) return;
+      _notificationHideTimers.remove(id);
+      setState(() => _pendingNotifications.remove(id));
+      _updateBlinking();
+
+      _notificationRetryTimers[id] = Timer(const Duration(minutes: 3), () {
+        if (!mounted) return;
+        _notificationRetryTimers.remove(id);
+        if (_confirmedNotificationIds.contains(id)) return;
+        final now = DateTime.now().millisecondsSinceEpoch;
+        final expiresAt = (notification['expires_at'] as num?)?.toInt() ?? 0;
+        if (expiresAt > now) _showNotification(id, notification);
+      });
+    });
+  }
+
+  void _confirmNotification(String id) {
+    _confirmedNotificationIds.add(id);
+    _notificationHideTimers[id]?.cancel();
+    _notificationHideTimers.remove(id);
+    _notificationRetryTimers[id]?.cancel();
+    _notificationRetryTimers.remove(id);
+    setState(() => _pendingNotifications.remove(id));
+    _updateBlinking();
+  }
+
+  void _updateBlinking() {
+    if (_pendingNotifications.isEmpty) {
+      _blinkTimer?.cancel();
+      _blinkTimer = null;
+      setState(() {
+        _blinkVisible = false;
+        _blinkColor = Colors.transparent;
+      });
+      return;
+    }
+    final types = _pendingNotifications.values.map((v) => v['type'] as String).toList();
+    final color = types.contains('トラブル')
+        ? Colors.red
+        : types.contains('給油依頼')
+            ? const Color(0xFF1E90FF)
+            : Colors.green;
+    setState(() => _blinkColor = color);
+    if (_blinkTimer != null) return; // 既に点滅中
+    _blinkTimer = Timer.periodic(const Duration(milliseconds: 500), (_) {
+      if (mounted) setState(() => _blinkVisible = !_blinkVisible);
+    });
+  }
+
+  Future<void> _sendNotification(String type) async {
+    await _cleanupExpiredNotifications();
+    final now = DateTime.now().millisecondsSinceEpoch;
+    await _db.child('rooms/${widget.roomCode}/notifications').push().set({
+      'type': type,
+      'senderUid': widget.userId,
+      'senderNick': widget.nickname,
+      'created_at': now,
+      'expires_at': now + 30 * 60 * 1000,
+    });
+    _startSenderBlink(type);
+    if (mounted) {
+      final icon = type == 'トラブル' ? '🆘' : type == '給油依頼' ? '⛽' : '🚻';
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text('$icon $typeをメンバーに通知しました'),
+        backgroundColor: const Color(0xFF1A3A5C),
+      ));
+    }
+  }
+
+  void _startSenderBlink(String type) {
+    final color = type == 'トラブル'
+        ? Colors.red
+        : type == '給油依頼'
+            ? const Color(0xFF1E90FF)
+            : Colors.green;
+    _senderBlinkTimer?.cancel();
+    _senderAutoStopTimer?.cancel();
+    setState(() {
+      _senderBlinkColor = color;
+      _senderBlinkVisible = true;
+    });
+    _senderBlinkTimer = Timer.periodic(const Duration(milliseconds: 500), (_) {
+      if (mounted) setState(() => _senderBlinkVisible = !_senderBlinkVisible);
+    });
+    _senderAutoStopTimer = Timer(const Duration(seconds: 30), () {
+      _senderBlinkTimer?.cancel();
+      _senderBlinkTimer = null;
+      _senderAutoStopTimer = null;
+      if (mounted) setState(() {
+        _senderBlinkVisible = false;
+        _senderBlinkColor = Colors.transparent;
+      });
+    });
+  }
+
+  Widget _buildNotificationBanners() {
+    // created_at が最新の1件のみ表示（他は内部タイマーを継続）
+    final latest = _pendingNotifications.entries.reduce((a, b) {
+      final aTime = (a.value['created_at'] as num?)?.toInt() ?? 0;
+      final bTime = (b.value['created_at'] as num?)?.toInt() ?? 0;
+      return aTime >= bTime ? a : b;
+    });
+    return Column(
+      children: [latest].map((entry) {
+        final id = entry.key;
+        final n = entry.value;
+        final type = n['type'] as String? ?? '';
+        final nick = n['senderNick'] as String? ?? '';
+        final icon = type == 'トラブル' ? '🆘' : type == '給油依頼' ? '⛽' : '🚻';
+        final color = type == 'トラブル'
+            ? Colors.red
+            : type == '給油依頼'
+                ? const Color(0xFF1E90FF)
+                : Colors.green;
+        return Container(
+          margin: const EdgeInsets.only(bottom: 4),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+          decoration: BoxDecoration(
+            color: color.withValues(alpha: 0.2),
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: color, width: 1),
+          ),
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(
+                  '$icon $nickさんが$type',
+                  style: const TextStyle(color: Colors.white, fontSize: 13),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              const SizedBox(width: 8),
+              ElevatedButton(
+                onPressed: () => _confirmNotification(id),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: color,
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                  minimumSize: Size.zero,
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+                child: const Text('確認', style: TextStyle(fontSize: 12, color: Colors.white)),
+              ),
+            ],
+          ),
+        );
+      }).toList(),
+    );
+  }
+
+  Widget _buildNotifyBtn({double? width}) {
+    return PopupMenuButton<String>(
+      onSelected: _sendNotification,
+      color: const Color(0xFF1A3A5C),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      itemBuilder: (context) => const [
+        PopupMenuItem(value: '給油依頼', child: Text('⛽ 給油依頼', style: TextStyle(color: Colors.white))),
+        PopupMenuItem(value: 'トイレ依頼', child: Text('🚻 トイレ依頼', style: TextStyle(color: Colors.white))),
+        PopupMenuItem(value: 'トラブル', child: Text('🆘 トラブル', style: TextStyle(color: Colors.white))),
+      ],
+      child: Container(
+        width: width,
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+        decoration: BoxDecoration(
+          color: _senderBlinkVisible
+              ? _senderBlinkColor.withValues(alpha: 0.8)
+              : const Color(0xFF2E4A6B),
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: const Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.notifications_active, color: Colors.white, size: 22),
+            SizedBox(height: 2),
+            Text('通知', textAlign: TextAlign.center, maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(color: Colors.white, fontSize: 10)),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ── ここまで通知機能 ──────────────────────────────────────────────
 
   BitmapDescriptor? _warningMarkerCache;
 
@@ -1161,6 +1417,12 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     _membersSubscription?.cancel();
     _destSubscription?.cancel();
     _warningsSubscription?.cancel();
+    _notificationsSubscription?.cancel();
+    _blinkTimer?.cancel();
+    _senderBlinkTimer?.cancel();
+    _senderAutoStopTimer?.cancel();
+    for (final t in _notificationHideTimers.values) { t.cancel(); }
+    for (final t in _notificationRetryTimers.values) { t.cancel(); }
     _appLinkSubscription?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     _db.child('rooms/${widget.roomCode}/members/${widget.userId}').remove();
@@ -1245,7 +1507,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     return Scaffold(
       backgroundColor: const Color(0xFF0A1628),
       appBar: AppBar(
-        backgroundColor: const Color(0xFF0A1628),
+        backgroundColor: _blinkVisible ? _blinkColor.withValues(alpha: 0.4) : const Color(0xFF0A1628),
         titleSpacing: 12,
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -1539,11 +1801,15 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
 
   Widget _buildBottomSection() {
     return Container(
-      color: const Color(0xFF0D1B2A),
+      color: _blinkVisible ? _blinkColor.withValues(alpha: 0.25) : const Color(0xFF0D1B2A),
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
+          if (_pendingNotifications.isNotEmpty) ...[
+            _buildNotificationBanners(),
+            const SizedBox(height: 4),
+          ],
           _buildMemberList(),
           const SizedBox(height: 6),
           _buildActionButtons(),
@@ -1558,7 +1824,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
       child: LayoutBuilder(
         builder: (context, constraints) {
-          const int buttonCount = 4; // 5ボタンに増やす時はここだけ変える
+          const int buttonCount = 5; // 5ボタンに増やす時はここだけ変える
           const double spacing = 8.0;
           final double btnWidth =
               ((constraints.maxWidth - spacing * (buttonCount - 1)) / buttonCount)
@@ -1629,6 +1895,8 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                 },
                 width: btnWidth,
               ),
+              const SizedBox(width: spacing),
+              _buildNotifyBtn(width: btnWidth),
             ],
           );
         },
