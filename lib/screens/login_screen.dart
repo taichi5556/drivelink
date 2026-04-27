@@ -9,6 +9,7 @@ import 'package:share_plus/share_plus.dart';
 import 'main_screen.dart';
 import 'package:app_links/app_links.dart';
 import 'dart:async';
+import '../services/room_history.dart';
 
 class LoginScreen extends StatefulWidget {
   static String lastProcessedCode = '';
@@ -26,6 +27,7 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
   bool _isLoading = false;
   bool _isJapanese = true;
   String? _createdRoomCode;
+  int? _createdExpiresAt;
   late AnimationController _fadeController;
   late Animation<double> _fadeAnim;
   StreamSubscription? _linkSub;
@@ -47,6 +49,90 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
     _fadeAnim = CurvedAnimation(parent: _fadeController, curve: Curves.easeOut);
     _fadeController.forward();
     _roomController.addListener(() => setState(() {}));
+    // フレーム描画後に復帰ダイアログを試行（deep link 非同期処理の完了を少し待つ）
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      await Future.delayed(const Duration(milliseconds: 500));
+      if (!mounted) return;
+      // deep link でルームコードが既にセットされていれば復帰ダイアログをスキップ
+      if (_roomController.text.isNotEmpty) return;
+      await _maybeShowResumeDialog();
+    });
+  }
+
+  Future<void> _maybeShowResumeDialog() async {
+    final entry = await RoomHistory.loadIfValid();
+    if (entry == null || !mounted) return;
+    final resume = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF0D1B2A),
+        title: const Text('前回のルームに戻る？', style: TextStyle(color: Colors.white)),
+        content: Text(
+          'ルームコード: ${entry.roomCode}\n${entry.nickname}として再入室します。',
+          style: const TextStyle(color: Colors.white70),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('いいえ', style: TextStyle(color: Colors.grey)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('戻る', style: TextStyle(color: Color(0xFFFF6B35))),
+          ),
+        ],
+      ),
+    );
+    if (!mounted) return;
+    if (resume == true) {
+      await _resumeRoom(entry);
+    } else {
+      await RoomHistory.clear();
+    }
+  }
+
+  /// 保存情報を使って即ルーム入室（Firebase上の最新期限を再確認してから遷移）
+  Future<void> _resumeRoom(RoomHistoryEntry entry) async {
+    setState(() => _isLoading = true);
+    try {
+      final userId = await _getStableUserId();
+      final db = FirebaseDatabase.instanceFor(
+        app: Firebase.app(),
+        databaseURL: 'https://drivelink-a7ffb-default-rtdb.asia-southeast1.firebasedatabase.app',
+      );
+      final expirySnapshot = await db.ref('rooms/${entry.roomCode}/info/expires_at').get();
+      final expiresAt = (expirySnapshot.value as num?)?.toInt();
+      if (!mounted) return;
+      if (expiresAt == null || expiresAt <= DateTime.now().millisecondsSinceEpoch) {
+        await RoomHistory.clear();
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('ルームの有効期限が切れています')),
+        );
+        setState(() => _isLoading = false);
+        return;
+      }
+      await db.ref('rooms/${entry.roomCode}/members/$userId').update({
+        'nickname': entry.nickname,
+        'vehicle_type': entry.vehicleType,
+      });
+      if (!mounted) return;
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(builder: (_) => MainScreen(
+          nickname: entry.nickname,
+          roomCode: entry.roomCode,
+          userId: userId,
+          vehicleType: entry.vehicleType,
+        )),
+      );
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
+        setState(() => _isLoading = false);
+      }
+    }
   }
 
   @override
@@ -172,7 +258,7 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
         'duration_hours': _selectedHours,
         'created_at': DateTime.now().millisecondsSinceEpoch,
       });
-      setState(() { _createdRoomCode = roomCode; _isLoading = false; });
+      setState(() { _createdRoomCode = roomCode; _createdExpiresAt = expiresAt; _isLoading = false; });
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
@@ -217,6 +303,13 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
       await db.ref('rooms/$roomCode/members/$userId').update({
         'nickname': nickname, 'vehicle_type': _vehicleType,
       });
+      // ルーム履歴を端末に保存（kill後の復帰ダイアログ用）
+      await RoomHistory.save(
+        roomCode: roomCode,
+        nickname: nickname,
+        vehicleType: _vehicleType,
+        expiresAt: expiresAt,
+      );
       if (!mounted) return;
       Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => MainScreen(nickname: nickname, roomCode: roomCode, userId: userId, vehicleType: _vehicleType)));
     } catch (e) {
@@ -240,6 +333,15 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
       'nickname': nickname,
       'vehicle_type': _vehicleType,
     });
+    // ルーム履歴を端末に保存（kill後の復帰ダイアログ用）
+    if (_createdExpiresAt != null) {
+      await RoomHistory.save(
+        roomCode: roomCode,
+        nickname: nickname,
+        vehicleType: _vehicleType,
+        expiresAt: _createdExpiresAt!,
+      );
+    }
     if (!mounted) return;
     Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => MainScreen(nickname: nickname, roomCode: roomCode, userId: userId, vehicleType: _vehicleType)));
   }

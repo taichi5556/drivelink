@@ -13,6 +13,7 @@ import 'package:geolocator/geolocator.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:google_mobile_ads/google_mobile_ads.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../services/room_history.dart';
 import 'login_screen.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:app_links/app_links.dart';
@@ -300,15 +301,22 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
           TextButton(
             onPressed: () {
               Navigator.pop(ctx);
-              Navigator.pushReplacement(
-                context,
-                MaterialPageRoute(builder: (_) => const LoginScreen()),
-              );
+              _exitToLogin();
             },
             child: const Text('OK', style: TextStyle(color: Color(0xFFFF6B35))),
           ),
         ],
       ),
+    );
+  }
+
+  /// ルーム退出時の共通処理：履歴クリア＋ログイン画面へ遷移
+  Future<void> _exitToLogin() async {
+    await RoomHistory.clear();
+    if (!mounted) return;
+    Navigator.pushReplacement(
+      context,
+      MaterialPageRoute(builder: (_) => const LoginScreen()),
     );
   }
 
@@ -1617,10 +1625,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
           TextButton.icon(
             icon: const Icon(Icons.exit_to_app, color: Colors.white, size: 18),
             label: const Text('退出', style: TextStyle(color: Colors.white, fontSize: 13)),
-            onPressed: () => Navigator.pushReplacement(
-              context,
-              MaterialPageRoute(builder: (_) => const LoginScreen()),
-            ),
+            onPressed: _exitToLogin,
           ),
         ],
       ),
@@ -1679,10 +1684,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                           ),
                         ),
                         GestureDetector(
-                          onTap: () => Navigator.pushReplacement(
-                            context,
-                            MaterialPageRoute(builder: (_) => const LoginScreen()),
-                          ),
+                          onTap: _exitToLogin,
                           child: const Icon(Icons.exit_to_app, color: Colors.white54, size: 20),
                         ),
                       ],
