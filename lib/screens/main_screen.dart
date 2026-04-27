@@ -69,9 +69,12 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   String get _activeDestName => _groupDestName;
 
   // ルート逸脱自動再検索
-  DateTime? _lastRerouteTime;
-  static const _rerouteThresholdMeters = 50.0;  // 逸脱判定距離
-  static const _rerouteCooldownSecs    = 20;     // 再検索間隔（秒）
+  DateTime? _lastRerouteTime;     // API 成功時刻（クールダウン基準）
+  bool _rerouteInFlight = false;  // 再検索 API 応答待ちガード（多重発火防止）
+  static const _rerouteThresholdHighSpeedMeters = 80.0;   // 50km/h 以上時の逸脱判定距離
+  static const _rerouteThresholdLowSpeedMeters  = 30.0;   // 50km/h 未満時の逸脱判定距離
+  static const _rerouteSpeedThresholdMps        = 13.89;  // 高低閾値の境界（50km/h）
+  static const _rerouteCooldownSecs             = 20;     // 再検索間隔（秒）
 
   // 接続状態判定（last_seen の経過時間がこの値を超えたら「接続切れ」表示）
   static const _connectionStaleSecs = 60;
@@ -104,6 +107,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   // ヘディングアップ
   bool _headingUp = false;
   double _currentBearing = 0.0;
+  double _currentSpeed = 0.0;  // 現在速度（m/s）。逸脱閾値の動的決定に使用
   double _currentZoom = 17.0;
   Timer? _routeOverviewTimer;
   bool _inRouteOverview = false;
@@ -892,8 +896,13 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     _rebuildMarkers();
   }
 
-  Future<void> _fetchRoute(LatLng dest, {bool isRerouting = false}) async {
+  Future<bool> _fetchRoute(LatLng dest, {bool isRerouting = false}) async {
+    if (isRerouting && _rerouteInFlight) return false;
+    if (isRerouting) _rerouteInFlight = true;
+
     const apiKey = 'AIzaSyChuUZypiVhojgCO6ZgZML-ZW3eYLtti5c';
+    String? failureReason; // null=成功 / 'ZERO_RESULTS' / 'OVER_QUERY_LIMIT' / 'EXCEPTION' / 'EMPTY' / その他status
+    bool succeeded = false;
     try {
       final origin = '${_myPosition.latitude},${_myPosition.longitude}';
       final destination = '${dest.latitude},${dest.longitude}';
@@ -906,7 +915,8 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
         final response = await request.close();
         final body = await response.transform(const Utf8Decoder()).join();
         final data = jsonDecode(body);
-        if (data['status'] == 'OK') {
+        final status = data['status'] as String?;
+        if (status == 'OK') {
           final steps = data['routes'][0]['legs'][0]['steps'] as List;
           final allCoords = <LatLng>[];
           for (final step in steps) {
@@ -969,14 +979,51 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                 });
               }
             }
+            succeeded = true;
+          } else {
+            failureReason = 'EMPTY';
           }
+        } else {
+          failureReason = status ?? 'UNKNOWN';
         }
       } finally {
         client.close();
       }
     } catch (e) {
       debugPrint('ルート取得エラー: $e');
+      failureReason = 'EXCEPTION';
+    } finally {
+      if (isRerouting) _rerouteInFlight = false;
     }
+
+    if (succeeded) {
+      if (isRerouting) _lastRerouteTime = DateTime.now();
+      return true;
+    }
+    if (failureReason != null) _showRouteFailureSnackBar(failureReason);
+    return false;
+  }
+
+  void _showRouteFailureSnackBar(String reason) {
+    if (!mounted) return;
+    String message;
+    switch (reason) {
+      case 'ZERO_RESULTS':
+        message = 'ルートが見つかりませんでした';
+        break;
+      case 'OVER_QUERY_LIMIT':
+        message = 'APIの利用制限に達しました（しばらくお待ちください）';
+        break;
+      default:
+        message = 'ルート取得に失敗しました';
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: Colors.redAccent,
+        duration: const Duration(seconds: 3),
+      ),
+    );
   }
 
   // ── 目的地履歴 ───────────────────────────────────────────────
@@ -1262,8 +1309,11 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     ).listen((pos) async {
       if (!mounted) return;
       setState(() => _myPosition = LatLng(pos.latitude, pos.longitude));
+      final spd = pos.speed;
+      // 負値（取得不可）は 0 扱い。bearing ガードの外で常に更新
+      _currentSpeed = spd > 0 ? spd : 0.0;
       // 速度が十分な場合のみbearingを更新（停車中の誤検知を防ぐ）
-      if (pos.speed > 0.5 && pos.heading >= 0) {
+      if (spd > 0.5 && pos.heading >= 0) {
         _currentBearing = pos.heading;
       }
       if (_shareLocation) {
@@ -1338,7 +1388,10 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   void _checkRouteDeviation() {
     if (_routePoints.isEmpty || _groupDestination == null) return;
 
-    // クールダウン中はスキップ
+    // 再検索 API 応答待ち中はスキップ（多重発火防止）
+    if (_rerouteInFlight) return;
+
+    // クールダウン中はスキップ（成功時のみ消費される）
     final now = DateTime.now();
     if (_lastRerouteTime != null &&
         now.difference(_lastRerouteTime!).inSeconds < _rerouteCooldownSecs) {
@@ -1349,19 +1402,13 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     if (points.isEmpty) return;
 
     final dist = _distanceToPolyline(_myPosition, points);
-    if (dist > _rerouteThresholdMeters) {
-      _lastRerouteTime = now;
-      debugPrint('ルート逸脱検知: ${dist.toStringAsFixed(0)}m → 再検索');
+    // 速度連動の動的閾値：50km/h以上は80m（高速並行誤検知抑制）、未満は30m（市街地で機敏に）
+    final threshold = _currentSpeed >= _rerouteSpeedThresholdMps
+        ? _rerouteThresholdHighSpeedMeters
+        : _rerouteThresholdLowSpeedMeters;
+    if (dist > threshold) {
+      debugPrint('ルート逸脱検知: ${dist.toStringAsFixed(0)}m (閾値=${threshold.toStringAsFixed(0)}m, 速度=${(_currentSpeed * 3.6).toStringAsFixed(1)}km/h) → 再検索');
       _fetchRoute(_groupDestination!, isRerouting: true);
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('📍 ルートを外れたため再検索しています...'),
-            backgroundColor: Color(0xFF1A3A5C),
-            duration: Duration(seconds: 2),
-          ),
-        );
-      }
     }
   }
 
