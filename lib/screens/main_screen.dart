@@ -42,7 +42,11 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   GoogleMapController? _mapController;
   bool _isFollowingMember = false;
   late bool _shareLocation;
-  int _programmaticCameraMove = 0;
+  // アプリ自身が直近にカメラを動かした時刻。onCameraMoveStartedの発火が
+  // ユーザー操作由来かプログラム由来かをタイムスタンプ差で判定するために使う。
+  DateTime? _lastProgrammaticMoveAt;
+  // この時間以内のonCameraMoveStartedはプログラム由来とみなす（ms）
+  static const _programmaticMoveGuardMs = 100;
   Set<Marker> _markers = {};
   LatLng _myPosition = const LatLng(35.6812, 139.7671);
   Timer? _expiryTimer;
@@ -1273,7 +1277,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       }
       if (!mounted) return;
       // 追従停止中（_isFollowingMember==true）はヘディングアップでもカメラを動かさない
-      if (!_inRouteOverview && !_isFollowingMember && _programmaticCameraMove == 0) {
+      if (!_inRouteOverview && !_isFollowingMember) {
         if (_headingUp) {
           _moveCameraWithBearing(_myPosition, _currentBearing);
         } else {
@@ -1315,7 +1319,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       }
       if (!mounted) return;
       // 追従停止中（_isFollowingMember==true）はヘディングアップでもカメラを動かさない
-      if (!_inRouteOverview && !_isFollowingMember && _programmaticCameraMove == 0) {
+      if (!_inRouteOverview && !_isFollowingMember) {
         if (_headingUp) {
           _moveCameraWithBearing(_myPosition, _currentBearing);
         } else {
@@ -1401,14 +1405,14 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   void _animateCamera(CameraUpdate update, {required bool programmatic}) {
     if (_mapController == null) return;
     if (programmatic) {
-      _programmaticCameraMove++;
+      _lastProgrammaticMoveAt = DateTime.now();
     }
     _mapController!.animateCamera(update);
   }
 
   void _animateCameraWithBearing(LatLng target, double bearing) {
     if (_mapController == null) return;
-    _programmaticCameraMove++;
+    _lastProgrammaticMoveAt = DateTime.now();
     _mapController!.animateCamera(
       CameraUpdate.newCameraPosition(
         CameraPosition(target: target, bearing: bearing, zoom: _currentZoom, tilt: 0),
@@ -1416,10 +1420,11 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     );
   }
 
-  // GPS追従用：即時移動（animateCameraと異なりonCameraMoveStartedを発生させない）
+  // GPS追従用：bearingを設定してカメラ移動（animateCamera経由）
   void _moveCameraWithBearing(LatLng target, double bearing) {
     if (_mapController == null) return;
-    _mapController!.moveCamera(
+    _lastProgrammaticMoveAt = DateTime.now();
+    _mapController!.animateCamera(
       CameraUpdate.newCameraPosition(
         CameraPosition(target: target, bearing: bearing, zoom: _currentZoom, tilt: 0),
       ),
@@ -1719,14 +1724,14 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
           _currentZoom = position.zoom;
         },
         onCameraMoveStarted: () {
-          if (_programmaticCameraMove > 0) {
-            _programmaticCameraMove--;
+          // 直近のプログラム移動から短時間内ならプログラム由来とみなして無視。
+          // それ以外（アニメ中の遅延発火含む）はユーザー操作とみなす。
+          if (_lastProgrammaticMoveAt != null &&
+              DateTime.now().difference(_lastProgrammaticMoveAt!).inMilliseconds <
+                  _programmaticMoveGuardMs) {
             return;
           }
           setState(() => _isFollowingMember = true);
-        },
-        onCameraIdle: () {
-          _programmaticCameraMove = 0;
         },
         myLocationEnabled: false,
         myLocationButtonEnabled: false,
