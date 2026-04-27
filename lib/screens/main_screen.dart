@@ -894,7 +894,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                 Polyline(
                   polylineId: const PolylineId('route'),
                   points: allCoords,
-                  color: const Color(0xFF1565C0),
+                  color: const Color(0xFFFF6B35),
                   width: 5,
                 ),
               };
@@ -1398,7 +1398,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       newPolylines.add(Polyline(
         polylineId: const PolylineId('route'),
         points: remaining,
-        color: const Color(0xFF1565C0),
+        color: const Color(0xFFFF6B35),
         width: 5,
       ));
     }
