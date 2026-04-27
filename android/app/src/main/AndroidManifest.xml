@@ -7,17 +7,26 @@
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" tools:node="remove"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION"/>
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <uses-permission android:name="android.permission.WAKE_LOCK"/>
 
-        <uses-permission android:name="android.permission.VIBRATE"/>
+    <uses-permission android:name="android.permission.VIBRATE"/>
+    <uses-permission android:name="com.google.android.gms.permission.AD_ID"/>
 <application
         android:name="androidx.multidex.MultiDexApplication"
-        android:label="DriveVoice"
+        android:label="ツーリンク"
         android:icon="@mipmap/ic_launcher">
 
         <!-- Google Maps APIキー -->
         <meta-data
             android:name="com.google.android.geo.API_KEY"
             android:value="AIzaSyD2bZKA-7v6ZzHSnZlMYH_0s7UemBUSOjs"/>
+
+        <!-- AdMob App ID -->
+        <meta-data
+            android:name="com.google.android.gms.ads.APPLICATION_ID"
+            android:value="ca-app-pub-4544332023567609~2103342785"/>
 
         <activity
             android:name=".MainActivity"
@@ -46,6 +55,10 @@
         <meta-data
             android:name="flutterEmbedding"
             android:value="2"/>
+        <service
+            android:name="com.baseflow.geolocator.ForegroundLocationService"
+            android:foregroundServiceType="location"
+            android:exported="false"/>
     </application>
     <queries>
         <intent>

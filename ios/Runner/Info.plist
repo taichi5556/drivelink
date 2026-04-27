@@ -7,7 +7,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>DriveVoice</string>
+	<string>ツーリンク</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -15,7 +15,7 @@
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>drivevoice</string>
+	<string>TouriLink</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
@@ -43,8 +43,6 @@
 	<string>ドライブ中のメンバーと位置情報を共有するために使用します</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>ドライブ中のメンバーと位置情報を共有するために使用します</string>
-	<key>NSMicrophoneUsageDescription</key>
-	<string>ドライブ仲間へのトランシーバー送信のためにマイクを使用します。音声はリアルタイムで同じルームのメンバーにのみ送信されます。</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
@@ -85,10 +83,14 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
-	<key>NSCameraUsageDescription</key>
-	<string>Agora SDKの音声通話機能のためにカメラへのアクセスが必要な場合があります。</string>
 	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
 	<string>ドライブ中のメンバーと位置情報を共有するために使用します。</string>
+	<key>GADApplicationIdentifier</key>
+	<string>ca-app-pub-4544332023567609~3044889361</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>location</string>
+	</array>
 
 </dict>
 </plist>

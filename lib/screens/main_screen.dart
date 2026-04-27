@@ -1,59 +1,60 @@
 import 'dart:async';
 import 'dart:math';
+import 'dart:convert';
+import 'dart:io';
+import 'dart:ui' as ui;
 
-import 'package:agora_rtc_engine/agora_rtc_engine.dart';
 import 'package:firebase_core/firebase_core.dart';
-import 'package:flutter/foundation.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:firebase_database/firebase_database.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:permission_handler/permission_handler.dart';
-import 'package:vibration/vibration.dart';
+import 'package:google_mobile_ads/google_mobile_ads.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import '../services/room_history.dart';
 import 'login_screen.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:app_links/app_links.dart';
-import 'dart:convert';
-import 'dart:io';
-import 'package:url_launcher/url_launcher.dart';
 import 'package:flutter_polyline_points/flutter_polyline_points.dart';
-
-const String agoraAppId = '9b3f59b1a52245b88a7cfbd33236f333';
+import 'package:share_plus/share_plus.dart';
+import 'package:qr_flutter/qr_flutter.dart';
 
 class MainScreen extends StatefulWidget {
   final String userId;
   final String nickname;
   final String roomCode;
+  final String vehicleType; // 'car' or 'bike'
   const MainScreen({
     Key? key,
     required this.userId,
     required this.nickname,
     required this.roomCode,
+    this.vehicleType = 'car',
   }) : super(key: key);
 
   @override
   State<MainScreen> createState() => _MainScreenState();
 }
 
-class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
+class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   GoogleMapController? _mapController;
   bool _isFollowingMember = false;
-  /// ユーザー操作ではない animateCamera 中は onCameraMoveStarted で追従モードにしない
-  bool _programmaticCameraMove = false;
+  late bool _shareLocation;
+  // アプリ自身が直近にカメラを動かした時刻。onCameraMoveStartedの発火が
+  // ユーザー操作由来かプログラム由来かをタイムスタンプ差で判定するために使う。
+  DateTime? _lastProgrammaticMoveAt;
+  // この時間以内のonCameraMoveStartedはプログラム由来とみなす（ms）
+  static const _programmaticMoveGuardMs = 100;
   Set<Marker> _markers = {};
   LatLng _myPosition = const LatLng(35.6812, 139.7671);
-  bool _isRecording = false;
-  bool _isOtherRecording = false;
   Timer? _expiryTimer;
   String _remainingTime = '';
   Timer? _countdownTimer;
-  Timer? _locationTimer;
+  StreamSubscription<Position>? _locationSubscription;
   bool _updateLocationInProgress = false;
-  String _fromNickname = '';
-  bool _showReceiving = false;
-  late AnimationController _pulseController;
+  bool _expiryHandled = false;
   Map<String, dynamic> _members = {};
   StreamSubscription? _membersSubscription;
 
@@ -61,18 +62,66 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
   LatLng? _groupDestination;
   String _groupDestName = '';
   StreamSubscription? _destSubscription;
-  Set<Polyline> _polylines = {}; // ルート線
+  Set<Polyline> _polylines = {};
   StreamSubscription? _appLinkSubscription;
   final _appLinks = AppLinks();
   LatLng? get _activeDestination => _groupDestination;
   String get _activeDestName => _groupDestName;
 
-  // Agora
-  RtcEngine? _agoraEngine;
-  final _audioChannel = const MethodChannel('drivelink/audio');
-  bool _agoraJoined = false;
-  int _recordSeconds = 0;
-  Timer? _recordTimer;
+  // ルート逸脱自動再検索
+  DateTime? _lastRerouteTime;     // API 成功時刻（クールダウン基準）
+  bool _rerouteInFlight = false;  // 再検索 API 応答待ちガード（多重発火防止）
+  static const _rerouteThresholdHighSpeedMeters = 80.0;   // 50km/h 以上時の逸脱判定距離
+  static const _rerouteThresholdLowSpeedMeters  = 30.0;   // 50km/h 未満時の逸脱判定距離
+  static const _rerouteSpeedThresholdMps        = 13.89;  // 高低閾値の境界（50km/h）
+  static const _rerouteCooldownSecs             = 20;     // 再検索間隔（秒）
+
+  // 接続状態判定（last_seen の経過時間がこの値を超えたら「接続切れ」表示）
+  static const _connectionStaleSecs = 60;
+  // メンバーリストUIの経過時間表示を更新する間隔
+  static const _connectionRefreshIntervalSecs = 10;
+
+  // 警告ポイント関連
+  Map<String, dynamic> _warnings = {};
+  StreamSubscription? _warningsSubscription;
+  Timer? _warningCleanupTimer;
+
+  // 接続状態UI更新タイマー（last_seen からの経過時間表示を定期リフレッシュ）
+  Timer? _connectionRefreshTimer;
+
+  // 通知関連
+  int _joinedAt = 0;
+  StreamSubscription? _notificationsSubscription;
+  final Map<String, Map<String, dynamic>> _pendingNotifications = {};
+  final Set<String> _confirmedNotificationIds = {};
+  final Map<String, Timer> _notificationHideTimers = {};
+  final Map<String, Timer> _notificationRetryTimers = {};
+  Timer? _blinkTimer;
+  bool _blinkVisible = false;
+  Color _blinkColor = Colors.transparent;
+  Timer? _senderBlinkTimer;
+  Timer? _senderAutoStopTimer;
+  bool _senderBlinkVisible = false;
+  Color _senderBlinkColor = Colors.transparent;
+
+  // ヘディングアップ
+  bool _headingUp = false;
+  double _currentBearing = 0.0;
+  double _currentSpeed = 0.0;  // 現在速度（m/s）。逸脱閾値の動的決定に使用
+  double _currentZoom = 17.0;
+  Timer? _routeOverviewTimer;
+  bool _inRouteOverview = false;
+
+  // 通過済みルート
+  List<LatLng> _routePoints = [];
+
+  // 車両マーカーキャッシュ（vehicleType-isMe → BitmapDescriptor）
+  final Map<String, BitmapDescriptor> _markerCache = {};
+
+
+  // AdMob
+  BannerAd? _bannerAd;
+  bool _isBannerAdLoaded = false;
 
   DatabaseReference get _db => FirebaseDatabase.instanceFor(
         app: Firebase.app(),
@@ -83,188 +132,209 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _shareLocation = false;
     WakelockPlus.enable();
-    _pulseController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 800),
-    )..repeat(reverse: true);
     _initAll();
+    _loadBannerAd();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _locationSubscription?.cancel();
+      _startLocationStream();
+      _updateLocation();
+    }
   }
 
   Future<void> _initAll() async {
-    await Permission.microphone.request();
     await Permission.locationWhenInUse.request();
-    await _initAgora();
+    // Android 13以降: 通知権限が必須（フォアグラウンドサービス通知に必要）
+    if (Platform.isAndroid) {
+      await Permission.notification.request();
+    }
     await _updateLocation();
-    _locationTimer = Timer.periodic(
-      const Duration(seconds: 5),
-      (_) => _updateLocation(),
-    );
+    _startLocationStream();
     _listenToMembers();
-    _listenToRecordingUser();
     _listenToDestination();
+    _listenToWarnings();
+    _joinedAt = DateTime.now().millisecondsSinceEpoch;
+    await _cleanupExpiredNotifications();
+    _listenToNotifications();
     _initAppLinks();
-    _startExpiryCheck();
+    await _startExpiryCheck();
+    // 期限切れ警告ポイントを1分ごとに削除
+    _warningCleanupTimer = Timer.periodic(
+      const Duration(minutes: 1),
+      (_) => _cleanupExpiredWarnings(),
+    );
+    // 接続状態の経過時間表示を定期更新（_membersは触らずsetStateだけ）
+    _connectionRefreshTimer = Timer.periodic(
+      const Duration(seconds: _connectionRefreshIntervalSecs),
+      (_) {
+        if (mounted) {
+          setState(() {});
+          _rebuildMarkers(); // マーカーのalphaも更新
+        }
+      },
+    );
+    // マップ読み込み完了後に位置共有確認ダイアログを表示
+    WidgetsBinding.instance.addPostFrameCallback((_) => _showLocationSharingDialog());
   }
 
-  Future<void> _initAgora() async {
-    try {
-      _agoraEngine = createAgoraRtcEngine();
-      await _agoraEngine!.initialize(RtcEngineContext(appId: agoraAppId));
-      await _agoraEngine!.setClientRole(role: ClientRoleType.clientRoleAudience);
-      await _agoraEngine!.enableAudio(); // 音声エンジン有効化
-      // iOSのAVAudioSessionをAgoraに触らせない（iOSのみ）
-      if (defaultTargetPlatform == TargetPlatform.iOS) {
-        await _agoraEngine!.setParameters('{"che.audio.ios.audioSessionRestriction": 128}');
-        await _agoraEngine!.setParameters('{"che.audio.enable.bt.hfp": false}');
-      }
-      await _agoraEngine!.muteLocalAudioStream(true); // マイクはミュート状態で待機
-      await _agoraEngine!.setAudioProfile(
-        profile: AudioProfileType.audioProfileMusicHighQuality,
-        scenario: AudioScenarioType.audioScenarioChatroom,
-      );
-      await _agoraEngine!.setDefaultAudioRouteToSpeakerphone(true);
-      _agoraEngine!.registerEventHandler(RtcEngineEventHandler(
-        onJoinChannelSuccess: (connection, elapsed) {
-          debugPrint('Agora参加成功: ${connection.channelId}');
-          if (mounted) setState(() => _agoraJoined = true);
-        },
-        onUserOffline: (connection, remoteUid, reason) {
-          debugPrint('ユーザー退出: $remoteUid');
-        },
-        onError: (err, msg) {
-          debugPrint('Agoraエラー: $err $msg');
-        },
-      ));
-      await _agoraEngine!.joinChannel(
-        token: '',
-        channelId: widget.roomCode,
-        uid: 0,
-        options: const ChannelMediaOptions(
-          channelProfile: ChannelProfileType.channelProfileCommunication,
-          clientRoleType: ClientRoleType.clientRoleBroadcaster,
-          publishMicrophoneTrack: false,
-          autoSubscribeAudio: true,
+  Future<void> _showLocationSharingDialog() async {
+    if (!mounted) return;
+    final share = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF0D1B2A),
+        title: const Text(
+          '⚠️ 再度確認！GPS情報を共有しますか？',
+          style: TextStyle(color: Colors.red, fontSize: 17, fontWeight: FontWeight.bold),
         ),
-      );
-      debugPrint('Agoraチャンネル参加中: ${widget.roomCode}');
-    } catch (e) {
-      debugPrint('Agora初期化エラー: $e');
+        content: const Text(
+          '自宅・職場など普段いる場所での使用は避けてください。\nルーム入室後でも変更できます。',
+          style: TextStyle(color: Colors.white70, fontSize: 14),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('共有しない', style: TextStyle(color: Colors.grey, fontSize: 15)),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF00D4FF),
+              foregroundColor: Colors.white,
+            ),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('共有する', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+          ),
+        ],
+      ),
+    );
+    if (!mounted) return;
+    final newValue = share ?? false;
+    setState(() => _shareLocation = newValue);
+    if (!newValue) {
+      await _db.child('rooms/${widget.roomCode}/members/${widget.userId}').remove();
+    } else {
+      await _updateLocation();
     }
   }
+
+  void _loadBannerAd() {
+    _bannerAd = BannerAd(
+      adUnitId: Platform.isIOS
+          ? 'ca-app-pub-4544332023567609/6687240610'
+          : 'ca-app-pub-4544332023567609/4801658317',
+      size: AdSize.banner,
+      request: const AdRequest(),
+      listener: BannerAdListener(
+        onAdLoaded: (_) {
+          if (mounted) setState(() => _isBannerAdLoaded = true);
+        },
+        onAdFailedToLoad: (ad, error) {
+          ad.dispose();
+          debugPrint('バナー広告読み込み失敗: $error');
+        },
+      ),
+    )..load();
+  }
+
   Future<void> _startExpiryCheck() async {
-    final snapshot = await _db.child('rooms/${widget.roomCode}/info/expires_at').get();
-    if (!mounted) return;
-    final expiresAt = snapshot.value as int?;
-    if (expiresAt == null) return;
-    final remaining = expiresAt - DateTime.now().millisecondsSinceEpoch;
-    if (remaining <= 0) {
-      _exitDueToExpiry();
-      return;
-    }
-    // 5分前に警告
-    if (remaining > 5 * 60 * 1000) {
-      Timer(Duration(milliseconds: remaining - 5 * 60 * 1000), () {
-        if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('⏰ ルームの使用時間まで残り5分です'),
-          backgroundColor: Color(0xFFFF6B35),
-          duration: Duration(seconds: 5),
-        ));
+    try {
+      final snapshot = await _db.child('rooms/${widget.roomCode}/info/expires_at').get();
+      if (!mounted) return;
+      // Firebase は iOS で double を返す場合があるため num? でキャスト
+      final expiresAt = (snapshot.value as num?)?.toInt();
+      if (expiresAt == null || expiresAt <= 0) return;
+      final remaining = expiresAt - DateTime.now().millisecondsSinceEpoch;
+      if (remaining <= 0) {
+        _exitDueToExpiry();
+        return;
+      }
+      if (remaining > 5 * 60 * 1000) {
+        Timer(Duration(milliseconds: remaining - 5 * 60 * 1000), () {
+          if (!mounted) return;
+          _startCountdown(expiresAt);
+        });
+      } else {
+        _startCountdown(expiresAt);
+      }
+      _expiryTimer = Timer(Duration(milliseconds: remaining), () {
+        if (mounted) _exitDueToExpiry();
       });
+    } catch (e) {
+      debugPrint('expiryCheck error: $e');
     }
-    // カウントダウン表示開始
-    _startCountdown(expiresAt);
-    // 時間切れで自動退出
-    _expiryTimer = Timer(Duration(milliseconds: remaining), () {
-      if (mounted) _exitDueToExpiry();
-    });
   }
 
   void _startCountdown(int expiresAt) {
-    _countdownTimer?.cancel();
-    _countdownTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+    _countdownTimer = Timer.periodic(const Duration(seconds: 30), (_) {
       if (!mounted) return;
       final remaining = expiresAt - DateTime.now().millisecondsSinceEpoch;
       if (remaining <= 0) {
-        _countdownTimer?.cancel();
-        setState(() => _remainingTime = '');
+        _exitDueToExpiry();
         return;
       }
-      final hours = remaining ~/ 3600000;
-      final minutes = (remaining % 3600000) ~/ 60000;
-      final seconds = (remaining % 60000) ~/ 1000;
-      final h = hours.toString();
-      final m = minutes.toString().padLeft(2, '0');
-      final s = seconds.toString().padLeft(2, '0');
+      final minutes = (remaining / 60000).ceil();
+      final hours = minutes ~/ 60;
+      final mins = minutes % 60;
       setState(() {
-        _remainingTime = hours > 0
-            ? '⏰ 残り ' + h + '時間' + m + '分'
-            : '⏰ 残り ' + m + '分' + s + '秒';
+        _remainingTime = hours > 0 ? '残り約${hours}時間${mins}分' : '残り約${mins}分';
       });
+    });
+    final remaining = expiresAt - DateTime.now().millisecondsSinceEpoch;
+    final minutes = (remaining / 60000).ceil();
+    final hours = minutes ~/ 60;
+    final mins = minutes % 60;
+    setState(() {
+      _remainingTime = hours > 0 ? '残り約${hours}時間${mins}分' : '残り約${mins}分';
     });
   }
 
   void _exitDueToExpiry() {
-    _db.child('rooms/${widget.roomCode}/members/${widget.userId}').remove();
-    if (!mounted) return;
+    if (!mounted || _expiryHandled) return;
+    _expiryHandled = true;
     showDialog(
       context: context,
       barrierDismissible: false,
-      builder: (_) => AlertDialog(
+      builder: (ctx) => AlertDialog(
         backgroundColor: const Color(0xFF0D1B2A),
-        title: const Text('⏰ ルーム時間終了', style: TextStyle(color: Colors.white)),
-        content: const Text('設定した使用時間が終了しました。お疲れ様でした！', style: TextStyle(color: Colors.white70)),
+        title: const Text('ルームの有効期限が切れました', style: TextStyle(color: Colors.white)),
+        content: const Text('ルームを退出します。', style: TextStyle(color: Colors.white70)),
         actions: [
           TextButton(
             onPressed: () {
-              Navigator.of(context).pop();
-              Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const LoginScreen()));
+              Navigator.pop(ctx);
+              _exitToLogin();
             },
-            child: const Text('OK', style: TextStyle(color: Color(0xFF00D4FF))),
+            child: const Text('OK', style: TextStyle(color: Color(0xFFFF6B35))),
           ),
         ],
       ),
     );
   }
 
-  void _listenToRecordingUser() {
-    _db.child('rooms/${widget.roomCode}/recording_user').onValue.listen((event) async {
-      final val = event.snapshot.value as String?;
-      final otherNick = val != null && val != widget.userId
-          ? ((_members[val] as Map?)?['nickname'] as String? ?? '他のユーザー')
-          : '';
-      final wasReceiving = _isOtherRecording;
-      final isNowReceiving = val != null && val != widget.userId;
-      if (!wasReceiving && isNowReceiving) {
-        await _agoraEngine?.setDefaultAudioRouteToSpeakerphone(true);
-      } else if (wasReceiving && !isNowReceiving) {
-        // 受信終了 → 送信準備（次のPTTを即座に送信できるよう準備）
-        await _agoraEngine?.updateChannelMediaOptions(const ChannelMediaOptions(
-          publishMicrophoneTrack: false,
-          clientRoleType: ClientRoleType.clientRoleBroadcaster,
-        ));
-        await _agoraEngine?.muteLocalAudioStream(true);
-      }
-      if (mounted) {
-        setState(() {
-          _isOtherRecording = isNowReceiving;
-          if (_isOtherRecording) _fromNickname = otherNick;
-          _showReceiving = _isOtherRecording;
-        });
-      }
-    });
+  /// ルーム退出時の共通処理：履歴クリア＋ログイン画面へ遷移
+  Future<void> _exitToLogin() async {
+    await RoomHistory.clear();
+    if (!mounted) return;
+    Navigator.pushReplacement(
+      context,
+      MaterialPageRoute(builder: (_) => const LoginScreen()),
+    );
   }
 
   Future<void> _initAppLinks() async {
-    // アプリ起動時のリンクを処理
     try {
       final initialLink = await _appLinks.getInitialLink();
       if (initialLink != null) _handleAppLink(initialLink);
     } catch (e) {
       debugPrint('AppLinks初期化エラー: $e');
     }
-    // アプリ起動中のリンクを監視
     _appLinkSubscription = _appLinks.uriLinkStream.listen(
       _handleAppLink,
       onError: (e) => debugPrint('AppLinksエラー: $e'),
@@ -277,60 +347,48 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
     double? lng;
     String name = '共有目的地';
 
-    // Google Maps URLパターン例：
-    // https://maps.google.com/?q=35.6762,139.6503
-    // https://www.google.com/maps/place/.../@35.6762,139.6503
-    // drivevoice://destination?lat=35.6762&lng=139.6503&name=道の駅A
-
     if (uri.scheme == 'drivevoice') {
       lat = double.tryParse(uri.queryParameters['lat'] ?? '');
       lng = double.tryParse(uri.queryParameters['lng'] ?? '');
       name = uri.queryParameters['name'] ?? '共有目的地';
     } else {
       // Google Maps URLから緯度経度を抽出
-      final query = uri.queryParameters['q'] ?? '';
-      final coords = RegExp(r'(-?\d+\.\d+),(-?\d+\.\d+)').firstMatch(query);
-      if (coords != null) {
-        lat = double.tryParse(coords.group(1) ?? '');
-        lng = double.tryParse(coords.group(2) ?? '');
-      }
-      // @lat,lng パターン
-      if (lat == null) {
-        final atCoords = RegExp(r'@(-?\d+\.\d+),(-?\d+\.\d+)').firstMatch(uri.toString());
-        if (atCoords != null) {
-          lat = double.tryParse(atCoords.group(1) ?? '');
-          lng = double.tryParse(atCoords.group(2) ?? '');
+      final path = uri.toString();
+      final atIndex = path.indexOf('@');
+      if (atIndex != -1) {
+        final afterAt = path.substring(atIndex + 1);
+        final parts = afterAt.split(',');
+        if (parts.length >= 2) {
+          lat = double.tryParse(parts[0]);
+          lng = double.tryParse(parts[1]);
         }
       }
-      // place名を取得
-      final pathSegments = uri.pathSegments;
-      if (pathSegments.contains('place') && pathSegments.length > pathSegments.indexOf('place') + 1) {
-        name = Uri.decodeComponent(pathSegments[pathSegments.indexOf('place') + 1]).replaceAll('+', ' ');
+      if (lat == null) {
+        final qParam = uri.queryParameters['q'];
+        if (qParam != null) {
+          final parts = qParam.split(',');
+          if (parts.length >= 2) {
+            lat = double.tryParse(parts[0]);
+            lng = double.tryParse(parts[1]);
+          }
+        }
       }
     }
 
     if (lat != null && lng != null) {
-      if (!mounted) return;
-      setState(() {
-        _groupDestination = LatLng(lat!, lng!);
-        _groupDestName = name;
-      });
-      _updateDestinationMarker();
-      // 目的地にカメラを移動
-      _animateCamera(CameraUpdate.newLatLng(LatLng(lat, lng)), programmatic: true);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('📍 目的地を設定しました：$name'),
-          backgroundColor: const Color(0xFF1A3A5C),
-          action: SnackBarAction(
-            label: 'グループに共有',
-            textColor: const Color(0xFF00D4FF),
-            onPressed: _shareGroupDestination,
+      if (mounted) {
+        setState(() {
+          _groupDestination = LatLng(lat!, lng!);
+          _groupDestName = name;
+        });
+        _updateDestinationMarker();
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('📍「$name」を目的地に設定しました'),
+            backgroundColor: const Color(0xFF1A3A5C),
           ),
-        ),
-      );
-    } else {
-      debugPrint('緯度経度の抽出失敗: $uri');
+        );
+      }
     }
   }
 
@@ -361,84 +419,660 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
           _groupDestName = name;
         });
         _updateDestinationMarker();
+        _saveDestHistory(name, lat, lng);
       }
     });
   }
+
+  // ── 警告ポイント ──────────────────────────────────────────────
+
+  void _listenToWarnings() {
+    _warningsSubscription = _db
+        .child('rooms/${widget.roomCode}/warnings')
+        .onValue
+        .listen((event) {
+      final data = event.snapshot.value as Map?;
+      if (!mounted) return;
+      if (data == null) {
+        setState(() => _warnings = {});
+        _rebuildMarkers();
+        return;
+      }
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final updated = <String, dynamic>{};
+      data.forEach((k, v) {
+        final w = v as Map;
+        final expiresAt = (w['expires_at'] as num?)?.toInt() ?? 0;
+        if (expiresAt > now) updated[k.toString()] = v;
+      });
+      setState(() => _warnings = updated);
+      _rebuildMarkers();
+    });
+  }
+
+  Future<void> _addWarning(LatLng position) async {
+    final id = _db.child('rooms/${widget.roomCode}/warnings').push().key!;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    await _db.child('rooms/${widget.roomCode}/warnings/$id').set({
+      'lat': position.latitude,
+      'lng': position.longitude,
+      'senderUid': widget.userId,
+      'senderNick': widget.nickname,
+      'created_at': now,
+      'expires_at': now + 30 * 60 * 1000,
+    });
+  }
+
+  Future<void> _cleanupExpiredWarnings() async {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final snapshot = await _db.child('rooms/${widget.roomCode}/warnings').get();
+    final data = snapshot.value as Map?;
+    if (data == null) return;
+    final updates = <String, dynamic>{};
+    data.forEach((k, v) {
+      final w = v as Map;
+      final expiresAt = (w['expires_at'] as num?)?.toInt() ?? 0;
+      if (expiresAt <= now) updates['$k'] = null;
+    });
+    if (updates.isNotEmpty) {
+      await _db.child('rooms/${widget.roomCode}/warnings').update(updates);
+    }
+  }
+
+  // ── 通知機能 ─────────────────────────────────────────────────────
+
+  Future<void> _cleanupExpiredNotifications() async {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final snapshot = await _db.child('rooms/${widget.roomCode}/notifications').get();
+    final data = snapshot.value as Map?;
+    if (data == null) return;
+    final updates = <String, dynamic>{};
+    data.forEach((k, v) {
+      final n = v as Map;
+      final expiresAt = (n['expires_at'] as num?)?.toInt() ?? 0;
+      if (expiresAt <= now) updates['$k'] = null;
+    });
+    if (updates.isNotEmpty) {
+      await _db.child('rooms/${widget.roomCode}/notifications').update(updates);
+    }
+  }
+
+  void _listenToNotifications() {
+    _notificationsSubscription = _db
+        .child('rooms/${widget.roomCode}/notifications')
+        .onValue
+        .listen(
+      (event) {
+        final now = DateTime.now().millisecondsSinceEpoch;
+        final data = event.snapshot.value as Map?;
+        if (data == null) return;
+        data.forEach((k, v) {
+          final id = k.toString();
+          final notification = Map<String, dynamic>.from(v as Map);
+          final expiresAt = (notification['expires_at'] as num?)?.toInt() ?? 0;
+          final createdAt = (notification['created_at'] as num?)?.toInt() ?? 0;
+          final senderUid = notification['senderUid'] as String? ?? '';
+          if (expiresAt <= now) return;
+          if (createdAt <= _joinedAt) return;
+          if (senderUid == widget.userId) return;
+          if (_confirmedNotificationIds.contains(id)) return;
+          if (_pendingNotifications.containsKey(id)) return;
+          if (_notificationHideTimers.containsKey(id)) return;
+          if (_notificationRetryTimers.containsKey(id)) return;
+          _showNotification(id, notification);
+        });
+      },
+      onError: (e) => debugPrint('notifications リスナーエラー: $e'),
+    );
+  }
+
+  void _showNotification(String id, Map<String, dynamic> notification) {
+    if (_confirmedNotificationIds.contains(id)) return;
+    if (_pendingNotifications.containsKey(id)) return;
+    setState(() => _pendingNotifications[id] = notification);
+    _updateBlinking();
+
+    _notificationHideTimers[id] = Timer(const Duration(seconds: 30), () {
+      if (!mounted) return;
+      _notificationHideTimers.remove(id);
+      setState(() => _pendingNotifications.remove(id));
+      _updateBlinking();
+
+      _notificationRetryTimers[id] = Timer(const Duration(minutes: 3), () {
+        if (!mounted) return;
+        _notificationRetryTimers.remove(id);
+        if (_confirmedNotificationIds.contains(id)) return;
+        final now = DateTime.now().millisecondsSinceEpoch;
+        final expiresAt = (notification['expires_at'] as num?)?.toInt() ?? 0;
+        if (expiresAt > now) _showNotification(id, notification);
+      });
+    });
+  }
+
+  void _confirmNotification(String id) {
+    _confirmedNotificationIds.add(id);
+    _notificationHideTimers[id]?.cancel();
+    _notificationHideTimers.remove(id);
+    _notificationRetryTimers[id]?.cancel();
+    _notificationRetryTimers.remove(id);
+    setState(() => _pendingNotifications.remove(id));
+    _updateBlinking();
+  }
+
+  void _updateBlinking() {
+    if (_pendingNotifications.isEmpty) {
+      _blinkTimer?.cancel();
+      _blinkTimer = null;
+      setState(() {
+        _blinkVisible = false;
+        _blinkColor = Colors.transparent;
+      });
+      return;
+    }
+    final types = _pendingNotifications.values.map((v) => v['type'] as String).toList();
+    final color = types.contains('トラブル')
+        ? Colors.red
+        : types.contains('給油依頼')
+            ? const Color(0xFF1E90FF)
+            : Colors.green;
+    setState(() => _blinkColor = color);
+    if (_blinkTimer != null) return; // 既に点滅中
+    _blinkTimer = Timer.periodic(const Duration(milliseconds: 500), (_) {
+      if (mounted) setState(() => _blinkVisible = !_blinkVisible);
+    });
+  }
+
+  Future<void> _sendNotification(String type) async {
+    await _cleanupExpiredNotifications();
+    final now = DateTime.now().millisecondsSinceEpoch;
+    await _db.child('rooms/${widget.roomCode}/notifications').push().set({
+      'type': type,
+      'senderUid': widget.userId,
+      'senderNick': widget.nickname,
+      'created_at': now,
+      'expires_at': now + 30 * 60 * 1000,
+    });
+    _startSenderBlink(type);
+    if (mounted) {
+      final icon = type == 'トラブル' ? '🆘' : type == '給油依頼' ? '⛽' : '🚻';
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text('$icon $typeをメンバーに通知しました'),
+        backgroundColor: const Color(0xFF1A3A5C),
+      ));
+    }
+  }
+
+  void _startSenderBlink(String type) {
+    final color = type == 'トラブル'
+        ? Colors.red
+        : type == '給油依頼'
+            ? const Color(0xFF1E90FF)
+            : Colors.green;
+    _senderBlinkTimer?.cancel();
+    _senderAutoStopTimer?.cancel();
+    setState(() {
+      _senderBlinkColor = color;
+      _senderBlinkVisible = true;
+    });
+    _senderBlinkTimer = Timer.periodic(const Duration(milliseconds: 500), (_) {
+      if (mounted) setState(() => _senderBlinkVisible = !_senderBlinkVisible);
+    });
+    _senderAutoStopTimer = Timer(const Duration(seconds: 30), () {
+      _senderBlinkTimer?.cancel();
+      _senderBlinkTimer = null;
+      _senderAutoStopTimer = null;
+      if (mounted) setState(() {
+        _senderBlinkVisible = false;
+        _senderBlinkColor = Colors.transparent;
+      });
+    });
+  }
+
+  Widget _buildNotificationBanners() {
+    // created_at が最新の1件のみ表示（他は内部タイマーを継続）
+    final latest = _pendingNotifications.entries.reduce((a, b) {
+      final aTime = (a.value['created_at'] as num?)?.toInt() ?? 0;
+      final bTime = (b.value['created_at'] as num?)?.toInt() ?? 0;
+      return aTime >= bTime ? a : b;
+    });
+    return Column(
+      children: [latest].map((entry) {
+        final id = entry.key;
+        final n = entry.value;
+        final type = n['type'] as String? ?? '';
+        final nick = n['senderNick'] as String? ?? '';
+        final icon = type == 'トラブル' ? '🆘' : type == '給油依頼' ? '⛽' : '🚻';
+        final color = type == 'トラブル'
+            ? Colors.red
+            : type == '給油依頼'
+                ? const Color(0xFF1E90FF)
+                : Colors.green;
+        return Container(
+          margin: const EdgeInsets.only(bottom: 4),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+          decoration: BoxDecoration(
+            color: color.withValues(alpha: 0.2),
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: color, width: 1),
+          ),
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(
+                  '$icon $nickさんが$type',
+                  style: const TextStyle(color: Colors.white, fontSize: 13),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              const SizedBox(width: 8),
+              ElevatedButton(
+                onPressed: () => _confirmNotification(id),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: color,
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                  minimumSize: Size.zero,
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+                child: const Text('確認', style: TextStyle(fontSize: 12, color: Colors.white)),
+              ),
+            ],
+          ),
+        );
+      }).toList(),
+    );
+  }
+
+  Widget _buildNotifyBtn({double? width}) {
+    return PopupMenuButton<String>(
+      onSelected: _sendNotification,
+      color: const Color(0xFF1A3A5C),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      itemBuilder: (context) => const [
+        PopupMenuItem(value: '給油依頼', child: Text('⛽ 給油依頼', style: TextStyle(color: Colors.white))),
+        PopupMenuItem(value: 'トイレ依頼', child: Text('🚻 トイレ依頼', style: TextStyle(color: Colors.white))),
+        PopupMenuItem(value: 'トラブル', child: Text('🆘 トラブル', style: TextStyle(color: Colors.white))),
+      ],
+      child: Container(
+        width: width,
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+        decoration: BoxDecoration(
+          color: _senderBlinkVisible
+              ? _senderBlinkColor.withValues(alpha: 0.8)
+              : const Color(0xFF2E4A6B),
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: const Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.notifications_active, color: Colors.white, size: 22),
+            SizedBox(height: 2),
+            Text('通知', textAlign: TextAlign.center, maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(color: Colors.white, fontSize: 10)),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ── ここまで通知機能 ──────────────────────────────────────────────
+
+  BitmapDescriptor? _warningMarkerCache;
+
+  Future<BitmapDescriptor> _getWarningMarker() async {
+    if (_warningMarkerCache != null) return _warningMarkerCache!;
+    // キャンバスサイズ: 幅52, 高さ70（ピンの先端を収めるため縦長）
+    const w = 52.0;
+    const h = 70.0;
+    const r = 24.0; // 円の半径
+    const cx = w / 2; // 円の中心X
+    const cy = r + 2; // 円の中心Y（上から少し余白）
+
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder);
+
+    // ピン形状（円 + 下向き三角）のパス
+    final path = Path()
+      ..addOval(Rect.fromCircle(center: const Offset(cx, cy), radius: r))
+      ..moveTo(cx - r * 0.45, cy + r * 0.75)
+      ..lineTo(cx + r * 0.45, cy + r * 0.75)
+      ..lineTo(cx, h - 2)
+      ..close();
+
+    // 赤塗り
+    canvas.drawPath(path, Paint()..color = const Color(0xFFD32F2F));
+    // 白枠（円部分のみ）
+    canvas.drawCircle(
+      const Offset(cx, cy),
+      r,
+      Paint()
+        ..color = Colors.white
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2.5,
+    );
+
+    // 白い「!」を円の中央に描画
+    final tp = TextPainter(textDirection: TextDirection.ltr)
+      ..text = const TextSpan(
+          text: '!',
+          style: TextStyle(
+              fontSize: 32,
+              fontWeight: FontWeight.bold,
+              color: Colors.white))
+      ..layout();
+    tp.paint(canvas, Offset(cx - tp.width / 2, cy - tp.height / 2));
+
+    final picture = recorder.endRecording();
+    final image = await picture.toImage(w.toInt(), h.toInt());
+    final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
+    if (bytes == null) return BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRed);
+    // imagePixelRatio: 2.5 → 画面上の表示サイズ ≈ 幅21dp・高さ28dp
+    _warningMarkerCache = BitmapDescriptor.bytes(
+      bytes.buffer.asUint8List(),
+      imagePixelRatio: 2.5,
+    );
+    return _warningMarkerCache!;
+  }
+
+  Future<BitmapDescriptor> _getVehicleMarker(String vehicleType, bool isMe) async {
+    final key = '$vehicleType-$isMe';
+    if (_markerCache.containsKey(key)) return _markerCache[key]!;
+
+    final emoji = vehicleType == 'bike' ? '🏍' : '🚗';
+    final bgColor = isMe ? const Color(0xFF1E90FF) : const Color(0xFFFF6B35);
+    // 高解像度で描画して imagePixelRatio で縮小表示（約20dp）
+    const size = 52.0;
+
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder);
+
+    // 背景円
+    canvas.drawCircle(
+      const Offset(size / 2, size / 2),
+      size / 2 - 1,
+      Paint()..color = bgColor,
+    );
+    // 白枠
+    canvas.drawCircle(
+      const Offset(size / 2, size / 2),
+      size / 2 - 1,
+      Paint()
+        ..color = Colors.white
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2,
+    );
+
+    // 絵文字
+    final tp = TextPainter(textDirection: TextDirection.ltr)
+      ..text = TextSpan(text: emoji, style: const TextStyle(fontSize: 22))
+      ..layout();
+    tp.paint(canvas, Offset((size - tp.width) / 2, (size - tp.height) / 2));
+
+    final picture = recorder.endRecording();
+    final image = await picture.toImage(size.toInt(), size.toInt());
+    final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
+    if (bytes == null) return BitmapDescriptor.defaultMarker;
+    // imagePixelRatio: 2.5 → 画面上の表示サイズ = 52 / 2.5 ≈ 20dp
+    final descriptor = BitmapDescriptor.bytes(
+      bytes.buffer.asUint8List(),
+      imagePixelRatio: 2.5,
+    );
+    _markerCache[key] = descriptor;
+    return descriptor;
+  }
+
+  Future<void> _rebuildMarkers() async {
+    // メンバーマーカーを再構築（警告マーカーを含む全マーカーを同期）
+    final newMarkers = <Marker>{};
+
+    // メンバーマーカー
+    for (final entry in _members.entries) {
+      final uid = entry.key;
+      final m = entry.value as Map;
+      if (m['lat'] == null || m['lng'] == null) continue;
+      final lat = (m['lat'] as num).toDouble();
+      final lng = (m['lng'] as num).toDouble();
+      final nick = m['nickname'] as String? ?? '';
+      final vehicleType = m['vehicle_type'] as String? ?? 'car';
+      final isMe = uid == widget.userId;
+      final icon = await _getVehicleMarker(vehicleType, isMe);
+      final stale = !isMe && _isStale(m);
+      newMarkers.add(Marker(
+        markerId: MarkerId(uid),
+        position: LatLng(lat, lng),
+        icon: icon,
+        alpha: stale ? 0.35 : 1.0,
+        infoWindow: InfoWindow(title: nick),
+      ));
+    }
+
+    // 目的地マーカー
+    if (_groupDestination != null) {
+      newMarkers.add(Marker(
+        markerId: const MarkerId('destination'),
+        position: _groupDestination!,
+        icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueBlue),
+        infoWindow: InfoWindow(title: _groupDestName),
+      ));
+    }
+
+    // 警告マーカー
+    final warningIcon = await _getWarningMarker();
+    _warnings.forEach((id, val) {
+      final w = val as Map;
+      final lat = (w['lat'] as num).toDouble();
+      final lng = (w['lng'] as num).toDouble();
+      final nick = w['senderNick'] as String? ?? '';
+      newMarkers.add(Marker(
+        markerId: MarkerId('warning_$id'),
+        position: LatLng(lat, lng),
+        icon: warningIcon,
+        infoWindow: InfoWindow(
+          title: '！ 注意喚起',
+          snippet: '$nickが報告',
+        ),
+      ));
+    });
+
+    setState(() => _markers = newMarkers);
+  }
+
+  // ── ここまで警告ポイント ───────────────────────────────────────
 
   void _updateDestinationMarker() {
     final dest = _activeDestination;
-    final name = _activeDestName;
-    setState(() {
-      _markers.removeWhere((m) => m.markerId.value == 'destination');
-      if (dest != null) {
-        _markers.add(Marker(
-          markerId: const MarkerId('destination'),
-          position: dest,
-          icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueBlue),
-          infoWindow: InfoWindow(title: name),
-        ));
-        _fetchRoute(dest); // ルート取得
-      } else {
-        setState(() => _polylines = {}); // 目的地なしでルート消去
-      }
-    });
+    if (dest != null) {
+      _fetchRoute(dest);
+    } else {
+      _inRouteOverview = false;
+      _routeOverviewTimer?.cancel();
+      setState(() {
+        _polylines = {};
+        _routePoints = [];
+        _headingUp = false;
+      });
+      _animateCameraWithBearing(_myPosition, 0);
+    }
+    _rebuildMarkers();
   }
 
-  Future<void> _fetchRoute(LatLng dest) async {
-    if (_myPosition == null) return;
-    debugPrint('_fetchRoute開始: dest=$dest');
+  Future<bool> _fetchRoute(LatLng dest, {bool isRerouting = false}) async {
+    if (isRerouting && _rerouteInFlight) return false;
+    if (isRerouting) _rerouteInFlight = true;
+
     const apiKey = 'AIzaSyChuUZypiVhojgCO6ZgZML-ZW3eYLtti5c';
+    String? failureReason; // null=成功 / 'ZERO_RESULTS' / 'OVER_QUERY_LIMIT' / 'EXCEPTION' / 'EMPTY' / その他status
+    bool succeeded = false;
     try {
-      final origin = '${_myPosition!.latitude},${_myPosition!.longitude}';
+      final origin = '${_myPosition.latitude},${_myPosition.longitude}';
       final destination = '${dest.latitude},${dest.longitude}';
       final url = 'https://maps.googleapis.com/maps/api/directions/json'
           '?origin=$origin&destination=$destination'
           '&mode=driving&language=ja&key=$apiKey';
       final client = HttpClient();
-      final request = await client.getUrl(Uri.parse(url));
-      final response = await request.close();
-      final body = await response.transform(const Utf8Decoder()).join();
-      final data = jsonDecode(body);
-      debugPrint('Directions API status: ${data["status"]}');
-      if (data['status'] == 'OK') {
-        final steps = data['routes'][0]['legs'][0]['steps'] as List;
-        final polyPts = PolylinePoints(apiKey: apiKey);
-        final allCoords = <LatLng>[];
-        for (final step in steps) {
-          final encoded = step['polyline']['points'] as String;
-          final points = PolylinePoints.decodePolyline(encoded);
-          allCoords.addAll(points.map((p) => LatLng(p.latitude, p.longitude)));
+      try {
+        final request = await client.getUrl(Uri.parse(url));
+        final response = await request.close();
+        final body = await response.transform(const Utf8Decoder()).join();
+        final data = jsonDecode(body);
+        final status = data['status'] as String?;
+        if (status == 'OK') {
+          final steps = data['routes'][0]['legs'][0]['steps'] as List;
+          final allCoords = <LatLng>[];
+          for (final step in steps) {
+            final encoded = step['polyline']['points'] as String;
+            final points = PolylinePoints.decodePolyline(encoded);
+            allCoords.addAll(points.map((p) => LatLng(p.latitude, p.longitude)));
+          }
+          if (allCoords.isNotEmpty && mounted) {
+            _routePoints = allCoords;
+            setState(() {
+              // 再検索時はヘディングアップ・追跡状態を変更しない
+              if (!isRerouting) {
+                _headingUp = true;
+                _isFollowingMember = false;
+              }
+              _polylines = {
+                Polyline(
+                  polylineId: const PolylineId('route'),
+                  points: allCoords,
+                  color: const Color(0xFFFF6B35),
+                  width: 5,
+                ),
+              };
+            });
+            _updatePassedRoute();
+            if (!isRerouting) {
+              // 前回のタイマーをキャンセル（5秒以内の再設定時の競合防止）
+              _routeOverviewTimer?.cancel();
+              // 縮退チェック（現在地と目的地が同じ場合は概観スキップ）
+              final isSamePoint = (_myPosition.latitude - dest.latitude).abs() < 0.00001 &&
+                  (_myPosition.longitude - dest.longitude).abs() < 0.00001;
+              if (isSamePoint) {
+                _animateCamera(CameraUpdate.newLatLngZoom(_myPosition, 17.0), programmatic: true);
+              } else {
+                // 現在地と目的地が両方見えるようズームアウト
+                final bounds = LatLngBounds(
+                  southwest: LatLng(
+                    min(_myPosition.latitude, dest.latitude),
+                    min(_myPosition.longitude, dest.longitude),
+                  ),
+                  northeast: LatLng(
+                    max(_myPosition.latitude, dest.latitude),
+                    max(_myPosition.longitude, dest.longitude),
+                  ),
+                );
+                _inRouteOverview = true;
+                _animateCamera(CameraUpdate.newLatLngBounds(bounds, 80), programmatic: true);
+                // 5秒後に通常ズームへ自動復帰
+                _routeOverviewTimer = Timer(const Duration(seconds: 5), () {
+                  if (!mounted || _routePoints.isEmpty) return;
+                  _inRouteOverview = false;
+                  _currentZoom = 17.0;
+                  // ユーザーが地図操作中（追従停止中）なら強制復帰しない
+                  if (_isFollowingMember) return;
+                  if (_headingUp) {
+                    _moveCameraWithBearing(_myPosition, _currentBearing);
+                  } else {
+                    _animateCamera(CameraUpdate.newLatLngZoom(_myPosition, 17.0), programmatic: true);
+                  }
+                });
+              }
+            }
+            succeeded = true;
+          } else {
+            failureReason = 'EMPTY';
+          }
+        } else {
+          failureReason = status ?? 'UNKNOWN';
         }
-        debugPrint('詳細ルートpoints=${allCoords.length}');
-        if (allCoords.isNotEmpty && mounted) {
-          setState(() {
-            _polylines = {
-              Polyline(
-                polylineId: const PolylineId('route'),
-                points: allCoords,
-                color: const Color(0xFF1565C0),
-                width: 5,
-              ),
-            };
-          });
-          _animateCamera(
-            CameraUpdate.newLatLngZoom(_myPosition!, 14),
-            programmatic: true,
-          );
-        }
-      } else {
-        debugPrint('ルートなし: ${data["status"]}');
+      } finally {
+        client.close();
       }
     } catch (e) {
       debugPrint('ルート取得エラー: $e');
+      failureReason = 'EXCEPTION';
+    } finally {
+      if (isRerouting) _rerouteInFlight = false;
+    }
+
+    if (succeeded) {
+      if (isRerouting) _lastRerouteTime = DateTime.now();
+      return true;
+    }
+    if (failureReason != null) _showRouteFailureSnackBar(failureReason);
+    return false;
+  }
+
+  void _showRouteFailureSnackBar(String reason) {
+    if (!mounted) return;
+    String message;
+    switch (reason) {
+      case 'ZERO_RESULTS':
+        message = 'ルートが見つかりませんでした';
+        break;
+      case 'OVER_QUERY_LIMIT':
+        message = 'APIの利用制限に達しました（しばらくお待ちください）';
+        break;
+      default:
+        message = 'ルート取得に失敗しました';
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: Colors.redAccent,
+        duration: const Duration(seconds: 3),
+      ),
+    );
+  }
+
+  // ── 目的地履歴 ───────────────────────────────────────────────
+  static const _historyKey = 'dest_history';
+  static const _historyMax = 3;
+
+  Future<List<Map<String, dynamic>>> _loadDestHistory() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(_historyKey);
+    if (raw == null) return [];
+    try {
+      return List<Map<String, dynamic>>.from(
+        (jsonDecode(raw) as List).map((e) => Map<String, dynamic>.from(e as Map)),
+      );
+    } catch (_) {
+      return [];
     }
   }
+
+  Future<void> _saveDestHistory(String name, double lat, double lng) async {
+    final prefs = await SharedPreferences.getInstance();
+    final history = await _loadDestHistory();
+    // 同名の重複を除去してから先頭に追加
+    history.removeWhere((e) => e['name'] == name);
+    history.insert(0, {'name': name, 'lat': lat, 'lng': lng});
+    if (history.length > _historyMax) history.removeRange(_historyMax, history.length);
+    await prefs.setString(_historyKey, jsonEncode(history));
+  }
+
+  // ── ここまで目的地履歴 ────────────────────────────────────────
+
   Future<void> _setPersonalDestination() async {
     final TextEditingController searchCtrl = TextEditingController();
     List<Map<String, dynamic>> searchResults = [];
+    List<Map<String, dynamic>> history = await _loadDestHistory();
     bool isSearching = false;
     const placesApiKey = 'AIzaSyChuUZypiVhojgCO6ZgZML-ZW3eYLtti5c';
 
+    void selectDest(BuildContext ctx, String name, double lat, double lng) {
+      setState(() {
+        _groupDestination = LatLng(lat, lng);
+        _groupDestName = name;
+      });
+      _updateDestinationMarker();
+      _saveDestHistory(name, lat, lng);
+      Navigator.pop(ctx);
+    }
+
+    if (!mounted) return;
     await showDialog(
       context: context,
       barrierDismissible: true,
@@ -451,7 +1085,6 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                // 検索バー
                 TextField(
                   controller: searchCtrl,
                   style: const TextStyle(color: Colors.white),
@@ -475,36 +1108,55 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
                     try {
                       final encoded = Uri.encodeComponent(val);
                       final url = 'https://maps.googleapis.com/maps/api/place/textsearch/json?query=$encoded&language=ja&region=jp&key=$placesApiKey';
-                      final uri = Uri.parse(url);
                       final client = HttpClient();
-                      final request = await client.getUrl(uri);
-                      final response = await request.close();
-                      final body = await response.transform(const Utf8Decoder()).join();
-                      final data = jsonDecode(body);
-                      if (data['status'] == 'OK') {
-                        final results = (data['results'] as List).take(5).map((r) {
-                          final loc = r['geometry']['location'];
-                          return {
-                            'name': r['name'] as String,
-                            'address': r['formatted_address'] as String? ?? '',
-                            'lat': (loc['lat'] as num).toDouble(),
-                            'lng': (loc['lng'] as num).toDouble(),
-                          };
-                        }).toList();
-                        setStateDialog(() {
-                          searchResults = List<Map<String, dynamic>>.from(results);
-                          isSearching = false;
-                        });
-                      } else {
-                        setStateDialog(() { searchResults = []; isSearching = false; });
+                      try {
+                        final request = await client.getUrl(Uri.parse(url));
+                        final response = await request.close();
+                        final body = await response.transform(const Utf8Decoder()).join();
+                        final data = jsonDecode(body);
+                        if (data['status'] == 'OK') {
+                          final results = (data['results'] as List).take(5).map((r) {
+                            final loc = r['geometry']['location'];
+                            return {
+                              'name': r['name'] as String,
+                              'address': r['formatted_address'] as String? ?? '',
+                              'lat': (loc['lat'] as num).toDouble(),
+                              'lng': (loc['lng'] as num).toDouble(),
+                            };
+                          }).toList();
+                          setStateDialog(() {
+                            searchResults = List<Map<String, dynamic>>.from(results);
+                            isSearching = false;
+                          });
+                        } else {
+                          setStateDialog(() { searchResults = []; isSearching = false; });
+                        }
+                      } finally {
+                        client.close();
                       }
                     } catch (e) {
                       setStateDialog(() { searchResults = []; isSearching = false; });
                     }
                   },
                 ),
-                const SizedBox(height: 8),
-                // 検索結果リスト
+                // 履歴（検索結果がないときだけ表示）
+                if (searchResults.isEmpty && history.isNotEmpty) ...[
+                  const SizedBox(height: 10),
+                  Row(children: [
+                    const Icon(Icons.history, color: Colors.grey, size: 14),
+                    const SizedBox(width: 4),
+                    const Text('最近の目的地', style: TextStyle(color: Colors.grey, fontSize: 11)),
+                  ]),
+                  const SizedBox(height: 4),
+                  ...history.map((h) => ListTile(
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.history, color: Color(0xFF6680AA), size: 18),
+                    title: Text(h['name'] as String, style: const TextStyle(color: Colors.white70, fontSize: 13)),
+                    onTap: () => selectDest(ctx, h['name'] as String, h['lat'] as double, h['lng'] as double),
+                  )),
+                ],
+                const SizedBox(height: 4),
                 if (searchResults.isNotEmpty)
                   ConstrainedBox(
                     constraints: const BoxConstraints(maxHeight: 250),
@@ -517,33 +1169,24 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
                           leading: const Icon(Icons.place, color: Color(0xFF00D4FF)),
                           title: Text(r['name'], style: const TextStyle(color: Colors.white, fontSize: 14)),
                           subtitle: Text(r['address'], style: const TextStyle(color: Colors.grey, fontSize: 11), maxLines: 1, overflow: TextOverflow.ellipsis),
-                          onTap: () async {
-                            setState(() {
-                              _groupDestination = LatLng(r['lat'], r['lng']);
-                              _groupDestName = r['name'];
-                            });
-                            _updateDestinationMarker();
-                            Navigator.pop(ctx);
-                          },
+                          onTap: () => selectDest(ctx, r['name'] as String, r['lat'] as double, r['lng'] as double),
                         );
                       },
                     ),
                   ),
-                // 現在地ボタン
                 const SizedBox(height: 4),
-                if (_myPosition != null)
-                  TextButton.icon(
-                    icon: const Icon(Icons.my_location, color: Color(0xFF00D4FF), size: 18),
-                    label: const Text('現在地を目的地に設定', style: TextStyle(color: Color(0xFF00D4FF))),
-                    onPressed: () {
-                      setState(() {
-                        _groupDestination = _myPosition;
-                        _groupDestName = '現在地';
-                      });
-                      _updateDestinationMarker();
-                      Navigator.pop(ctx);
-                    },
-                  ),
+                TextButton.icon(
+                  icon: const Icon(Icons.my_location, color: Color(0xFF00D4FF), size: 18),
+                  label: const Text('現在地を目的地に設定', style: TextStyle(color: Color(0xFF00D4FF))),
+                  onPressed: () {
+                    setState(() {
+                      _groupDestination = _myPosition;
+                      _groupDestName = '現在地';
+                    });
+                    _updateDestinationMarker();
+                    Navigator.pop(ctx);
+                  },
+                ),
               ],
             ),
           ),
@@ -582,6 +1225,7 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
       'name': name,
       'senderUid': widget.userId,
       'senderNick': widget.nickname,
+      'shared_at': DateTime.now().millisecondsSinceEpoch,
     });
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -590,37 +1234,110 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
     }
   }
 
+  /// last_seen からの経過秒数を返す。null/不正値は null を返す。
+  int? _secondsSinceLastSeen(Map memberData) {
+    final raw = memberData['last_seen'];
+    if (raw is! num) return null;
+    final lastSeenMs = raw.toInt();
+    final diffMs = DateTime.now().millisecondsSinceEpoch - lastSeenMs;
+    if (diffMs < 0) return 0; // 未来時刻（時計ズレ）→ 0扱い
+    return diffMs ~/ 1000;
+  }
+
+  /// 接続切れ判定（last_seen が無い場合は false=接続中扱い）
+  bool _isStale(Map memberData) {
+    final secs = _secondsSinceLastSeen(memberData);
+    return secs != null && secs >= _connectionStaleSecs;
+  }
+
+  /// 経過時間の表示文字列を返す。60秒未満 or null は空文字。
+  String _formatElapsed(Map memberData) {
+    final secs = _secondsSinceLastSeen(memberData);
+    if (secs == null || secs < _connectionStaleSecs) return '';
+    if (secs < 3600) return '${secs ~/ 60}分前';
+    return '${secs ~/ 3600}時間前';
+  }
+
   void _listenToMembers() {
     _membersSubscription = _db
         .child('rooms/${widget.roomCode}/members')
         .onValue
-        .listen((event) {
-      final data = event.snapshot.value as Map?;
-      if (data == null) return;
-      final updated = <String, dynamic>{};
-      data.forEach((k, v) => updated[k.toString()] = v);
-      final newMarkers = <Marker>{};
-      updated.forEach((uid, val) {
-        final m = val as Map;
-        final lat = (m['lat'] as num).toDouble();
-        final lng = (m['lng'] as num).toDouble();
-        final nick = m['nickname'] as String? ?? '';
-        final isMe = uid == widget.userId;
-        newMarkers.add(Marker(
-          markerId: MarkerId(uid),
-          position: LatLng(lat, lng),
-          icon: isMe
-              ? BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueBlue)
-              : BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueOrange),
-          infoWindow: InfoWindow(title: nick),
-        ));
-      });
-      if (mounted) {
-        setState(() {
-          _members = updated;
-          _markers = newMarkers;
+        .listen(
+      (event) {
+        final data = event.snapshot.value as Map?;
+        if (data == null) return;
+        final updated = <String, dynamic>{};
+        data.forEach((k, v) => updated[k.toString()] = v);
+        if (mounted) {
+          setState(() => _members = updated);
+          _rebuildMarkers();
+        }
+      },
+      onError: (e) => debugPrint('members リスナーエラー: $e'),
+    );
+  }
+
+  LocationSettings _buildLocationSettings() {
+    if (Platform.isAndroid) {
+      return AndroidSettings(
+        accuracy: LocationAccuracy.high,
+        intervalDuration: const Duration(seconds: 2),
+        foregroundNotificationConfig: const ForegroundNotificationConfig(
+          notificationText: 'バックグラウンドで位置情報を更新中',
+          notificationTitle: 'TouriLink',
+          enableWakeLock: true,
+        ),
+      );
+    } else if (Platform.isIOS) {
+      return AppleSettings(
+        accuracy: LocationAccuracy.high,
+        activityType: ActivityType.automotiveNavigation,
+        pauseLocationUpdatesAutomatically: false,
+        allowBackgroundLocationUpdates: true,
+        showBackgroundLocationIndicator: true,
+      );
+    }
+    return const LocationSettings(
+      accuracy: LocationAccuracy.high,
+      distanceFilter: 5,
+    );
+  }
+
+  void _startLocationStream() {
+    _locationSubscription = Geolocator.getPositionStream(
+      locationSettings: _buildLocationSettings(),
+    ).listen((pos) async {
+      if (!mounted) return;
+      setState(() => _myPosition = LatLng(pos.latitude, pos.longitude));
+      final spd = pos.speed;
+      // 負値（取得不可）は 0 扱い。bearing ガードの外で常に更新
+      _currentSpeed = spd > 0 ? spd : 0.0;
+      // 速度が十分な場合のみbearingを更新（停車中の誤検知を防ぐ）
+      if (spd > 0.5 && pos.heading >= 0) {
+        _currentBearing = pos.heading;
+      }
+      if (_shareLocation) {
+        await _db.child('rooms/${widget.roomCode}/members/${widget.userId}').update({
+          'nickname': widget.nickname,
+          'lat': pos.latitude,
+          'lng': pos.longitude,
+          'vehicle_type': widget.vehicleType,
+          'last_seen': DateTime.now().millisecondsSinceEpoch,
         });
       }
+      if (!mounted) return;
+      // 追従停止中（_isFollowingMember==true）はヘディングアップでもカメラを動かさない
+      if (!_inRouteOverview && !_isFollowingMember) {
+        if (_headingUp) {
+          _moveCameraWithBearing(_myPosition, _currentBearing);
+        } else {
+          _animateCamera(CameraUpdate.newLatLng(_myPosition), programmatic: true);
+        }
+      }
+      _checkRouteDeviation();
+      _updatePassedRoute();
+    }, onError: (e) {
+      debugPrint('位置情報ストリームエラー: $e');
     });
   }
 
@@ -634,26 +1351,33 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
         final requested = await Geolocator.requestPermission();
         if (requested == LocationPermission.denied ||
             requested == LocationPermission.deniedForever) {
-          _locationTimer?.cancel();
+          _locationSubscription?.cancel();
           return;
         }
       }
       final pos = await Geolocator.getCurrentPosition();
       if (!mounted) return;
       setState(() => _myPosition = LatLng(pos.latitude, pos.longitude));
-      await _db.child('rooms/${widget.roomCode}/members/${widget.userId}').update({
-        'nickname': widget.nickname,
-        'lat': pos.latitude,
-        'lng': pos.longitude,
-        'last_seen': DateTime.now().millisecondsSinceEpoch,
-      });
-      if (!mounted) return;
-      if (!_isFollowingMember && !_programmaticCameraMove) {
-        _animateCamera(
-          CameraUpdate.newLatLng(_myPosition),
-          programmatic: true,
-        );
+      if (_shareLocation) {
+        await _db.child('rooms/${widget.roomCode}/members/${widget.userId}').update({
+          'nickname': widget.nickname,
+          'lat': pos.latitude,
+          'lng': pos.longitude,
+          'vehicle_type': widget.vehicleType,
+          'last_seen': DateTime.now().millisecondsSinceEpoch,
+        });
       }
+      if (!mounted) return;
+      // 追従停止中（_isFollowingMember==true）はヘディングアップでもカメラを動かさない
+      if (!_inRouteOverview && !_isFollowingMember) {
+        if (_headingUp) {
+          _moveCameraWithBearing(_myPosition, _currentBearing);
+        } else {
+          _animateCamera(CameraUpdate.newLatLngZoom(_myPosition, 17.0), programmatic: true);
+        }
+      }
+      // ルート逸脱チェック
+      _checkRouteDeviation();
     } catch (e) {
       debugPrint('位置情報エラー: $e');
     } finally {
@@ -661,134 +1385,299 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
     }
   }
 
-  Future<void> _startRecording() async {
-    debugPrint('録音開始試行: _isOtherRecording=$_isOtherRecording, _isRecording=$_isRecording');
-    if (_isOtherRecording || _isRecording) return;
-    if (!_agoraJoined) {
-      debugPrint('Agora未接続のため録音不可');
+  void _checkRouteDeviation() {
+    if (_routePoints.isEmpty || _groupDestination == null) return;
+
+    // 再検索 API 応答待ち中はスキップ（多重発火防止）
+    if (_rerouteInFlight) return;
+
+    // クールダウン中はスキップ（成功時のみ消費される）
+    final now = DateTime.now();
+    if (_lastRerouteTime != null &&
+        now.difference(_lastRerouteTime!).inSeconds < _rerouteCooldownSecs) {
       return;
     }
 
-    // iOS/Android両対応の振動フィードバック（録音開始を通知）
-    if (await Vibration.hasVibrator() ?? false) {
-      Vibration.vibrate(duration: 100); // 100ms の短い振動
-    }
+    final points = _routePoints;
+    if (points.isEmpty) return;
 
-    // マイクトラックを有効化
-    try {
-      await _agoraEngine?.updateChannelMediaOptions(const ChannelMediaOptions(
-        publishMicrophoneTrack: true,
-        clientRoleType: ClientRoleType.clientRoleBroadcaster,
-      ));
-    } catch (e) {
-      debugPrint('startRecording Agora error: $e');
-      return;
-    }
-    // 受信直後の場合に備えて少し待機
-    if (_isOtherRecording == false) {
-      await Future.delayed(const Duration(milliseconds: 300));
-    }
-    await _db.child('rooms/${widget.roomCode}/recording_user').set(widget.userId);
-    try {
-      await _agoraEngine?.muteLocalAudioStream(false);
-      if (mounted) setState(() { _isRecording = true; _recordSeconds = 0; });
-      _recordTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-        setState(() => _recordSeconds++);
-        if (_recordSeconds >= 30) _stopRecording();
-      });
-      debugPrint('Agora録音開始');
-    } catch (e) {
-      debugPrint('録音開始エラー: $e');
-      await _db.child('rooms/${widget.roomCode}/recording_user').remove();
+    final dist = _distanceToPolyline(_myPosition, points);
+    // 速度連動の動的閾値：50km/h以上は80m（高速並行誤検知抑制）、未満は30m（市街地で機敏に）
+    final threshold = _currentSpeed >= _rerouteSpeedThresholdMps
+        ? _rerouteThresholdHighSpeedMeters
+        : _rerouteThresholdLowSpeedMeters;
+    if (dist > threshold) {
+      debugPrint('ルート逸脱検知: ${dist.toStringAsFixed(0)}m (閾値=${threshold.toStringAsFixed(0)}m, 速度=${(_currentSpeed * 3.6).toStringAsFixed(1)}km/h) → 再検索');
+      _fetchRoute(_groupDestination!, isRerouting: true);
     }
   }
 
-  Future<void> _stopRecording() async {
-    // マイクトラックを無効化
-    if (_agoraJoined) {
-      try {
-        await _agoraEngine?.updateChannelMediaOptions(const ChannelMediaOptions(
-          publishMicrophoneTrack: false,
-          clientRoleType: ClientRoleType.clientRoleBroadcaster,
-        ));
-      } catch (e) {
-        debugPrint('stopRecording Agora error: $e');
-      }
+  /// 現在地からポリライン（各線分）までの最短距離（メートル）を返す
+  double _distanceToPolyline(LatLng point, List<LatLng> polylinePoints) {
+    if (polylinePoints.length == 1) return _metersTo(point, polylinePoints[0]);
+    double minDist = double.infinity;
+    for (int i = 0; i < polylinePoints.length - 1; i++) {
+      final d = _distanceToSegment(point, polylinePoints[i], polylinePoints[i + 1]);
+      if (d < minDist) minDist = d;
     }
-    _recordTimer?.cancel();
-    try {
-      await _agoraEngine?.muteLocalAudioStream(true);
-    } catch (e) {
-      debugPrint('録音停止エラー: $e');
-    }
-    await _db.child('rooms/${widget.roomCode}/recording_user').remove();
-    if (mounted) setState(() { _isRecording = false; _recordSeconds = 0; });
+    return minDist;
+  }
 
-    debugPrint('Agora録音停止');
+  /// 点 p から線分 a-b までの最短距離（メートル）
+  double _distanceToSegment(LatLng p, LatLng a, LatLng b) {
+    final cosLat = cos(p.latitude * pi / 180);
+    // 局所平面座標に変換（メートル）
+    final px = (p.longitude - a.longitude) * cosLat * 111320;
+    final py = (p.latitude  - a.latitude)           * 111320;
+    final dx = (b.longitude - a.longitude) * cosLat * 111320;
+    final dy = (b.latitude  - a.latitude)           * 111320;
+    final lenSq = dx * dx + dy * dy;
+    if (lenSq == 0) return sqrt(px * px + py * py);
+    final t = ((px * dx + py * dy) / lenSq).clamp(0.0, 1.0);
+    return sqrt(pow(px - t * dx, 2) + pow(py - t * dy, 2));
+  }
+
+  /// 2点間の距離（メートル）
+  double _metersTo(LatLng a, LatLng b) {
+    const r = 6371000.0;
+    final dLat = (b.latitude  - a.latitude)  * pi / 180;
+    final dLng = (b.longitude - a.longitude) * pi / 180;
+    final sinLat = sin(dLat / 2);
+    final sinLng = sin(dLng / 2);
+    final h = sinLat * sinLat +
+        cos(a.latitude * pi / 180) * cos(b.latitude * pi / 180) * sinLng * sinLng;
+    return r * 2 * atan2(sqrt(h), sqrt(1 - h));
   }
 
   void _animateCamera(CameraUpdate update, {required bool programmatic}) {
     if (_mapController == null) return;
     if (programmatic) {
-      _programmaticCameraMove = true;
+      _lastProgrammaticMoveAt = DateTime.now();
     }
     _mapController!.animateCamera(update);
   }
 
-  double _calcDistance(double lat, double lng) {
-    const R = 6371.0;
-    final dLat = (lat - _myPosition.latitude) * (3.141592653589793 / 180);
-    final dLng = (lng - _myPosition.longitude) * (3.141592653589793 / 180);
-    final a = (dLat / 2) * (dLat / 2) +
-        (_myPosition.latitude * 3.141592653589793 / 180).abs() *
-            (dLng / 2) * (dLng / 2);
-    return R * 2 * atan2(sqrt(a), sqrt(1 - a));
+  void _animateCameraWithBearing(LatLng target, double bearing) {
+    if (_mapController == null) return;
+    _lastProgrammaticMoveAt = DateTime.now();
+    _mapController!.animateCamera(
+      CameraUpdate.newCameraPosition(
+        CameraPosition(target: target, bearing: bearing, zoom: _currentZoom, tilt: 0),
+      ),
+    );
   }
+
+  // GPS追従用：bearingを設定してカメラ移動（animateCamera経由）
+  void _moveCameraWithBearing(LatLng target, double bearing) {
+    if (_mapController == null) return;
+    _lastProgrammaticMoveAt = DateTime.now();
+    _mapController!.animateCamera(
+      CameraUpdate.newCameraPosition(
+        CameraPosition(target: target, bearing: bearing, zoom: _currentZoom, tilt: 0),
+      ),
+    );
+  }
+
+  void _updatePassedRoute() {
+    if (_routePoints.isEmpty || !mounted) return;
+    // 現在地から最も近いルート点のインデックスを検索
+    int closestIdx = 0;
+    double minDist = double.infinity;
+    for (int i = 0; i < _routePoints.length; i++) {
+      final d = _metersTo(_myPosition, _routePoints[i]);
+      if (d < minDist) {
+        minDist = d;
+        closestIdx = i;
+      }
+    }
+    final passed = _routePoints.sublist(0, closestIdx + 1);
+    final remaining = _routePoints.sublist(closestIdx);
+    final newPolylines = <Polyline>{};
+    if (passed.length >= 2) {
+      newPolylines.add(Polyline(
+        polylineId: const PolylineId('route_passed'),
+        points: passed,
+        color: Colors.grey.withValues(alpha: 0.35),
+        width: 5,
+      ));
+    }
+    if (remaining.length >= 2) {
+      newPolylines.add(Polyline(
+        polylineId: const PolylineId('route'),
+        points: remaining,
+        color: const Color(0xFFFF6B35),
+        width: 5,
+      ));
+    }
+    setState(() => _polylines = newPolylines);
+  }
+
 
   @override
   void dispose() {
     WakelockPlus.disable();
-    _pulseController.dispose();
-    _locationTimer?.cancel();
-    _recordTimer?.cancel();
+    _locationSubscription?.cancel();
+    _countdownTimer?.cancel();
+    _expiryTimer?.cancel();
+    _warningCleanupTimer?.cancel();
+    _connectionRefreshTimer?.cancel();
+    _routeOverviewTimer?.cancel();
     _membersSubscription?.cancel();
-    _db.child('rooms/${widget.roomCode}/members/${widget.userId}').remove();
     _destSubscription?.cancel();
+    _warningsSubscription?.cancel();
+    _notificationsSubscription?.cancel();
+    _blinkTimer?.cancel();
+    _senderBlinkTimer?.cancel();
+    _senderAutoStopTimer?.cancel();
+    for (final t in _notificationHideTimers.values) { t.cancel(); }
+    for (final t in _notificationRetryTimers.values) { t.cancel(); }
     _appLinkSubscription?.cancel();
-    _db.child('rooms/${widget.roomCode}/recording_user').remove();
-    _agoraEngine?.leaveChannel();
-    _agoraEngine?.release();
+    WidgetsBinding.instance.removeObserver(this);
+    _db.child('rooms/${widget.roomCode}/members/${widget.userId}').remove();
+    _bannerAd?.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    return OrientationBuilder(
+      builder: (context, orientation) {
+        if (orientation == Orientation.landscape) {
+          return _buildLandscapeLayout();
+        }
+        return _buildPortraitLayout();
+      },
+    );
+  }
+
+  Future<void> _toggleLocationSharing() async {
+    final newValue = !_shareLocation;
+    setState(() => _shareLocation = newValue);
+    if (!newValue) {
+      // OFF: Firebaseから自分の位置情報を削除（他ユーザーに見えなくなる）
+      await _db.child('rooms/${widget.roomCode}/members/${widget.userId}').remove();
+    } else {
+      // ON: 即座に現在位置をFirebaseに送信
+      await _updateLocation();
+    }
+  }
+
+  void _showQrDialog() {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF0D1B2A),
+        title: const Text('QRコード', style: TextStyle(color: Colors.white, fontSize: 16)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              color: Colors.white,
+              padding: const EdgeInsets.all(12),
+              child: QrImageView(
+                data: 'https://drivelink-a7ffb.web.app/join?room=${widget.roomCode}',
+                version: QrVersions.auto,
+                size: 220,
+              ),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              widget.roomCode,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 22,
+                fontWeight: FontWeight.bold,
+                letterSpacing: 4,
+              ),
+            ),
+            const SizedBox(height: 4),
+            const Text('このQRコードを仲間に読み取ってもらおう',
+                style: TextStyle(color: Colors.grey, fontSize: 11)),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('閉じる', style: TextStyle(color: Color(0xFF00D4FF))),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _shareRoomCode() {
+    final link = 'https://drivelink-a7ffb.web.app/join?room=${widget.roomCode}';
+    SharePlus.instance.share(ShareParams(text: 'TouriLinkで一緒にツーリングしよう！\nリンクをタップしてルームに参加👇\n$link\n\nリンクが使えない場合はルームコード: ${widget.roomCode}'));
+  }
+
+  // 縦向きレイアウト
+  Widget _buildPortraitLayout() {
     return Scaffold(
       backgroundColor: const Color(0xFF0A1628),
       appBar: AppBar(
-        backgroundColor: const Color(0xFF0A1628),
+        backgroundColor: _blinkVisible ? _blinkColor.withValues(alpha: 0.4) : const Color(0xFF0A1628),
+        titleSpacing: 12,
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('DriveVoice',
+            Text('TouriLink',
                 style: GoogleFonts.audiowide(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
             Text('ルーム: ${widget.roomCode} | ${_members.length}人が走行中',
                 style: const TextStyle(color: Colors.grey, fontSize: 12)),
           ],
         ),
         actions: [
-          if (_agoraJoined)
-            const Padding(
-              padding: EdgeInsets.only(right: 12),
-              child: Icon(Icons.wifi, color: Colors.green, size: 20),
-            ),
+          // 位置共有スイッチ（GPSラベル付き）
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                'GPS',
+                style: TextStyle(
+                  color: _shareLocation ? Colors.green : Colors.grey,
+                  fontSize: 12,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              Switch(
+                value: _shareLocation,
+                activeThumbColor: Colors.green,
+                inactiveThumbColor: Colors.grey,
+                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                onChanged: (_) => _toggleLocationSharing(),
+              ),
+            ],
+          ),
+          PopupMenuButton<String>(
+            icon: const Icon(Icons.more_vert, color: Colors.white),
+            color: const Color(0xFF0D1B2A),
+            onSelected: (value) {
+              if (value == 'qr') _showQrDialog();
+              if (value == 'share') _shareRoomCode();
+            },
+            itemBuilder: (ctx) => [
+              const PopupMenuItem(
+                value: 'qr',
+                child: Row(children: [
+                  Icon(Icons.qr_code_rounded, color: Colors.white, size: 20),
+                  SizedBox(width: 10),
+                  Text('QRコードを表示', style: TextStyle(color: Colors.white)),
+                ]),
+              ),
+              const PopupMenuItem(
+                value: 'share',
+                child: Row(children: [
+                  Icon(Icons.share_rounded, color: Colors.white, size: 20),
+                  SizedBox(width: 10),
+                  Text('ルームを共有', style: TextStyle(color: Colors.white)),
+                ]),
+              ),
+            ],
+          ),
           TextButton.icon(
             icon: const Icon(Icons.exit_to_app, color: Colors.white, size: 18),
             label: const Text('退出', style: TextStyle(color: Colors.white, fontSize: 13)),
-            onPressed: () => Navigator.pushReplacement(
-              context,
-              MaterialPageRoute(builder: (_) => const LoginScreen()),
-            ),
+            onPressed: _exitToLogin,
           ),
         ],
       ),
@@ -796,10 +1685,74 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
         bottom: true,
         child: Column(
           children: [
-            if (_showReceiving) _buildReceivingBanner(),
             if (_remainingTime.isNotEmpty) _buildTimerBanner(),
-            Expanded(flex: 3, child: _buildMap()),
-            Expanded(flex: 2, child: _buildRecButton()),
+            Expanded(child: _buildMap()),
+            _buildBottomSection(),
+            if (_isBannerAdLoaded) _buildAdBanner(),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // 横向きレイアウト
+  Widget _buildLandscapeLayout() {
+    return Scaffold(
+      backgroundColor: const Color(0xFF0A1628),
+      body: SafeArea(
+        child: Row(
+          children: [
+            // 左: マップ（メイン）
+            Expanded(
+              flex: 3,
+              child: Column(
+                children: [
+                  if (_remainingTime.isNotEmpty) _buildTimerBanner(),
+                  Expanded(child: _buildMap()),
+                ],
+              ),
+            ),
+            // 右: サイドパネル
+            Container(
+              width: 320,
+              color: const Color(0xFF0D1B2A),
+              child: Column(
+                children: [
+                  // ルーム情報 + 退出ボタン
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                    color: const Color(0xFF0A1628),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text('TouriLink',
+                                  style: GoogleFonts.audiowide(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold)),
+                              Text('${_members.length}人が走行中',
+                                  style: const TextStyle(color: Colors.grey, fontSize: 10)),
+                            ],
+                          ),
+                        ),
+                        GestureDetector(
+                          onTap: _exitToLogin,
+                          child: const Icon(Icons.exit_to_app, color: Colors.white54, size: 20),
+                        ),
+                      ],
+                    ),
+                  ),
+                  // メンバーリスト（縦向き）
+                  Expanded(
+                    child: _buildMemberListVertical(),
+                  ),
+                  // アクションボタン
+                  _buildActionButtons(),
+                  // 広告
+                  if (_isBannerAdLoaded) _buildAdBanner(),
+                ],
+              ),
+            ),
           ],
         ),
       ),
@@ -807,78 +1760,165 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
   }
 
   Widget _buildMap() {
-    return ClipRRect(
-        borderRadius: BorderRadius.circular(16),
-        child: Stack(
-          children: [
-            GoogleMap(
-          initialCameraPosition: CameraPosition(target: _myPosition, zoom: 15),
-          markers: _markers,
-          polylines: _polylines,
-          onMapCreated: (c) => _mapController = c,
-          onCameraMoveStarted: () {
-            if (_programmaticCameraMove) {
-              _programmaticCameraMove = false;
-              return;
-            }
-            setState(() => _isFollowingMember = true);
-          },
-          onCameraIdle: () {
-            _programmaticCameraMove = false;
-          },
-          myLocationEnabled: false,
-          myLocationButtonEnabled: false,
-          zoomControlsEnabled: false,
-        ),
-            Positioned(
-              right: 8,
-              bottom: 70,
-              child: FloatingActionButton(
-                heroTag: 'share_route_btn',
-                backgroundColor: _groupDestination != null
-                    ? const Color(0xFF00D4FF)
-                    : Colors.grey[300],
-                onPressed: _groupDestination != null
-                    ? _shareGroupDestination
-                    : null,
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Icon(
-                      Icons.share,
-                      color: _groupDestination != null ? Colors.white : Colors.grey,
-                      size: 20,
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      'ルート共有',
-                      style: TextStyle(
-                        color: _groupDestination != null ? Colors.white : Colors.grey,
-                        fontSize: 9,
-                      ),
-                    ),
-                  ],
-                ),
+    return Stack(
+      children: [
+        GoogleMap(
+        initialCameraPosition: CameraPosition(target: _myPosition, zoom: 17),
+        markers: _markers,
+        polylines: _polylines,
+        onMapCreated: (c) => _mapController = c,
+        onCameraMove: (position) {
+          _currentZoom = position.zoom;
+        },
+        onCameraMoveStarted: () {
+          // 直近のプログラム移動から短時間内ならプログラム由来とみなして無視。
+          // それ以外（アニメ中の遅延発火含む）はユーザー操作とみなす。
+          if (_lastProgrammaticMoveAt != null &&
+              DateTime.now().difference(_lastProgrammaticMoveAt!).inMilliseconds <
+                  _programmaticMoveGuardMs) {
+            return;
+          }
+          setState(() => _isFollowingMember = true);
+        },
+        myLocationEnabled: false,
+        myLocationButtonEnabled: false,
+        zoomControlsEnabled: false,
+        padding: EdgeInsets.zero,
+        onLongPress: (latLng) async {
+          final result = await showDialog<String>(
+            context: context,
+            builder: (ctx) => AlertDialog(
+              backgroundColor: const Color(0xFF0D1B2A),
+              title: const Text('この地点をどうしますか？', style: TextStyle(color: Colors.white, fontSize: 16)),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  ListTile(
+                    leading: const Icon(Icons.place, color: Color(0xFF00D4FF)),
+                    title: const Text('目的地に設定', style: TextStyle(color: Colors.white)),
+                    onTap: () => Navigator.pop(ctx, 'destination'),
+                  ),
+                  ListTile(
+                    leading: const Icon(Icons.warning_amber_rounded, color: Colors.orangeAccent),
+                    title: const Text('注意喚起を報告', style: TextStyle(color: Colors.white)),
+                    onTap: () => Navigator.pop(ctx, 'warning'),
+                  ),
+                ],
               ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('キャンセル', style: TextStyle(color: Colors.grey)),
+                ),
+              ],
             ),
-            Positioned(
-              right: 8,
-              bottom: 8,
-              child: FloatingActionButton.small(
-                backgroundColor: Colors.white,
-                onPressed: () {
-                  setState(() => _isFollowingMember = true);
+          );
+          if (!mounted) return;
+          if (result == 'destination') {
+            const name = 'マップで選択した地点';
+            setState(() {
+              _groupDestination = latLng;
+              _groupDestName = name;
+            });
+            _updateDestinationMarker();
+            _saveDestHistory(name, latLng.latitude, latLng.longitude);
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('📍 目的地を設定しました'),
+                backgroundColor: Color(0xFF1A3A5C),
+              ),
+            );
+          } else if (result == 'warning') {
+            await _addWarning(latLng);
+            if (mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text('！ 注意喚起を報告しました（30分間表示）'),
+                  backgroundColor: Color(0xFF1A3A5C),
+                ),
+              );
+            }
+          }
+        },
+        ),
+        // 現在地に戻るFAB（追従停止中のみ表示・ピル型・中央下）
+        if (_isFollowingMember)
+          Positioned(
+            left: 0,
+            right: 0,
+            bottom: 24,
+            child: Center(
+              child: GestureDetector(
+                onTap: () {
+                  setState(() => _isFollowingMember = false);
                   _animateCamera(
-                    CameraUpdate.newLatLng(_myPosition),
+                    CameraUpdate.newLatLngZoom(_myPosition, 17.0),
                     programmatic: true,
                   );
                 },
-                child: const Icon(Icons.my_location, color: Colors.grey),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF00D4FF),
+                    borderRadius: BorderRadius.circular(24),
+                    boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 4)],
+                  ),
+                  child: const Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.my_location, color: Colors.white, size: 20),
+                      SizedBox(width: 8),
+                      Text(
+                        '現在地へ戻る',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
               ),
             ),
-          ],
+          ),
+        // ヘディングアップ ON/OFF ボタン
+        Positioned(
+          right: 12,
+          bottom: 12,
+          child: GestureDetector(
+            onTap: () {
+              final newVal = !_headingUp;
+              setState(() {
+                _headingUp = newVal;
+                if (newVal) _isFollowingMember = false;
+              });
+              if (newVal) {
+                _animateCameraWithBearing(_myPosition, _currentBearing);
+              } else {
+                _animateCameraWithBearing(_myPosition, 0);
+              }
+            },
+            child: Container(
+              width: 44,
+              height: 44,
+              decoration: BoxDecoration(
+                color: _headingUp
+                    ? const Color(0xFF00D4FF)
+                    : const Color(0xFF1A3A5C).withValues(alpha: 0.9),
+                shape: BoxShape.circle,
+                boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 4)],
+              ),
+              child: Icon(
+                Icons.navigation,
+                color: _headingUp ? Colors.white : Colors.white70,
+                size: 24,
+              ),
+            ),
+          ),
         ),
-      );
+      ],
+    );
   }
 
   Widget _buildTimerBanner() {
@@ -902,132 +1942,188 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
     );
   }
 
-  Widget _buildReceivingBanner() {
+  Widget _buildBottomSection() {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      color: const Color(0xFF1A3A5C),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.center,
+      color: _blinkVisible ? _blinkColor.withValues(alpha: 0.25) : const Color(0xFF0D1B2A),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
         children: [
-          const Icon(Icons.volume_up, color: Colors.green, size: 20),
-          const SizedBox(width: 8),
-          Text(
-            _isOtherRecording ? '${_fromNickname}さんが話しています...' : '${_fromNickname}さんの声を受信中...',
-            style: const TextStyle(color: Colors.white, fontSize: 14),
-          ),
+          if (_pendingNotifications.isNotEmpty) ...[
+            _buildNotificationBanners(),
+            const SizedBox(height: 4),
+          ],
+          _buildMemberList(),
+          const SizedBox(height: 6),
+          _buildActionButtons(),
         ],
       ),
     );
   }
 
-  Widget _buildRecButton() {
+  // アクションボタン行（縦・横レイアウト共用）
+  Widget _buildActionButtons() {
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-        children: [
-          _buildMemberList(),
-          const SizedBox(height: 2),
-          if (_isRecording)
-            Text(
-              '送信中... 残り ${30 - _recordSeconds}秒',
-              style: const TextStyle(color: Colors.redAccent, fontSize: 14),
-            ),
-          const SizedBox(height: 2),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.center,
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          const int buttonCount = 4; // 「現在地」はマップ右下FABに移行
+          const double spacing = 8.0;
+          final double btnWidth =
+              ((constraints.maxWidth - spacing * (buttonCount - 1)) / buttonCount)
+                  .clamp(60.0, 100.0);
+
+          return Row(
+            mainAxisAlignment: MainAxisAlignment.start,
             children: [
-              Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  FloatingActionButton.small(
-                    heroTag: 'dest_btn',
-                    backgroundColor: _polylines.isNotEmpty
-                        ? Colors.redAccent
-                        : _groupDestination != null
-                            ? const Color(0xFF1E90FF)
-                            : const Color(0xFF1A3A5C),
-                    onPressed: _polylines.isNotEmpty
-                        ? () {
-                            setState(() {
-                              _groupDestination = null;
-                              _groupDestName = '';
-                              _polylines = {};
-                            });
-                            _updateDestinationMarker();
-                          }
-                        : _setPersonalDestination,
-                    child: Icon(
-                      _polylines.isNotEmpty ? Icons.stop : Icons.place,
-                      color: Colors.white,
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    _polylines.isNotEmpty ? '終了' : _groupDestination != null ? '共有' : '目的地',
-                    style: const TextStyle(color: Colors.white70, fontSize: 10),
-                  ),
-                ],
+              _buildActionBtn(
+                icon: _polylines.isNotEmpty ? Icons.stop : Icons.place,
+                label: _polylines.isNotEmpty ? '案内終了' : '目的地',
+                color: _polylines.isNotEmpty
+                    ? Colors.redAccent
+                    : _groupDestination != null
+                        ? const Color(0xFF1E90FF)
+                        : const Color(0xFF1A3A5C),
+                onTap: _polylines.isNotEmpty
+                    ? () {
+                        setState(() {
+                          _groupDestination = null;
+                          _groupDestName = '';
+                          _polylines = {};
+                          _routePoints = [];
+                          _headingUp = false;
+                        });
+                        _animateCameraWithBearing(_myPosition, 0);
+                        _updateDestinationMarker();
+                      }
+                    : _setPersonalDestination,
+                width: btnWidth,
               ),
-              const SizedBox(width: 12),
-              Expanded(
-                child:
-          GestureDetector(
-            onTapDown: (_) async {
-              await _agoraEngine?.muteLocalAudioStream(false);
-            },
-            onLongPressStart: _isOtherRecording ? null : (_) => _startRecording(),
-            onLongPressEnd: _isOtherRecording ? null : (_) => _stopRecording(),
-            child: AnimatedBuilder(
-              animation: _pulseController,
-              builder: (_, __) => Container(
-                width: 300,
-                height: 160,
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(40),
-                  color: _isOtherRecording
-                      ? Colors.grey
-                      : _isRecording
-                          ? Color.lerp(Colors.red, Colors.redAccent, _pulseController.value)!
-                          : const Color(0xFFFF6B35),
-                  boxShadow: [
-                    BoxShadow(
-                      color: (_isOtherRecording
-                              ? Colors.grey
-                              : _isRecording ? Colors.red : const Color(0xFFFF6B35))
-                          .withAlpha((_pulseController.value * 180).toInt()),
-                      blurRadius: 20,
-                      spreadRadius: 5,
-                    ),
-                  ],
-                ),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Icon(
-                      _isRecording ? Icons.mic : Icons.mic_none,
-                      color: Colors.white,
-                      size: 36,
-                    ),
-                    const SizedBox(width: 12),
-                    Text(
-                      _isOtherRecording ? '録音中(他ユーザー)' : _isRecording ? '送信中...' : '押してる間、全員へ送信',
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 18,
-                        fontWeight: FontWeight.bold,
+              const SizedBox(width: spacing),
+              _buildActionBtn(
+                icon: Icons.share,
+                label: 'ルート共有',
+                color: _groupDestination != null
+                    ? const Color(0xFF00D4FF)
+                    : Colors.grey.shade800,
+                onTap: _groupDestination != null ? _shareGroupDestination : null,
+                width: btnWidth,
+              ),
+              const SizedBox(width: spacing),
+              _buildActionBtn(
+                icon: Icons.warning_amber_rounded,
+                label: '速度注意',
+                color: const Color(0xFFB71C1C),
+                onTap: () async {
+                  await _addWarning(_myPosition);
+                  if (mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text('！ 注意喚起を報告しました（30分間表示）'),
+                        backgroundColor: Color(0xFF1A3A5C),
                       ),
-                    ),
-                  ],
-                ),
+                    );
+                  }
+                },
+                width: btnWidth,
+              ),
+              const SizedBox(width: spacing),
+              _buildNotifyBtn(width: btnWidth),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildActionBtn({
+    required IconData icon,
+    required String label,
+    required Color color,
+    VoidCallback? onTap,
+    double? width,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        width: width,
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+        decoration: BoxDecoration(
+          color: color,
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, color: Colors.white, size: 22),
+            const SizedBox(height: 2),
+            Text(
+              label,
+              textAlign: TextAlign.center,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(color: Colors.white, fontSize: 10),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildAdBanner() {
+    return Container(
+      alignment: Alignment.center,
+      width: _bannerAd!.size.width.toDouble(),
+      height: _bannerAd!.size.height.toDouble(),
+      child: AdWidget(ad: _bannerAd!),
+    );
+  }
+
+  // 横向き用: 縦スクロールのメンバーリスト
+  Widget _buildMemberListVertical() {
+    final uids = _members.keys.toList();
+    return ListView.builder(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      itemCount: uids.length,
+      itemBuilder: (context, index) {
+        final uid = uids[index];
+        final m = _members[uid] as Map;
+        if (m['lat'] == null || m['lng'] == null) return const SizedBox.shrink();
+        final nick = m['nickname'] as String? ?? '?';
+        final lat = (m['lat'] as num).toDouble();
+        final lng = (m['lng'] as num).toDouble();
+        final dist = _metersTo(LatLng(lat, lng), _myPosition) / 1000;
+        final isMe = uid == widget.userId;
+        final stale = !isMe && _isStale(m);
+        return Opacity(
+          opacity: stale ? 0.4 : 1.0,
+          child: ListTile(
+            dense: true,
+            leading: CircleAvatar(
+              radius: 16,
+              backgroundColor: isMe ? const Color(0xFF1E90FF) : const Color(0xFFFF6B35),
+              child: Text(
+                nick.isNotEmpty ? nick[0].toUpperCase() : '?',
+                style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold),
               ),
             ),
-          ),
+            title: Text(nick, style: const TextStyle(color: Colors.white, fontSize: 12)),
+            subtitle: Text(
+              isMe
+                  ? '自分'
+                  : (stale ? _formatElapsed(m) : '${dist.toStringAsFixed(1)}km'),
+              style: TextStyle(
+                color: stale ? const Color(0xFFFFB74D) : Colors.grey[400],
+                fontSize: 10,
               ),
-            ],
+            ),
+            onTap: () {
+              setState(() => _isFollowingMember = true);
+              _mapController?.animateCamera(CameraUpdate.newLatLng(LatLng(lat, lng)));
+            },
           ),
-        ],
-      ),
+        );
+      },
     );
   }
 
@@ -1042,10 +2138,11 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
         itemBuilder: (context, index) {
           final uid = uids[index];
           final m = _members[uid] as Map;
+          if (m['lat'] == null || m['lng'] == null) return const SizedBox.shrink();
           final nick = m['nickname'] as String? ?? '?';
           final lat = (m['lat'] as num).toDouble();
           final lng = (m['lng'] as num).toDouble();
-          final dist = _calcDistance(lat, lng);
+          final dist = _metersTo(LatLng(lat, lng), _myPosition) / 1000;
           final isMe = uid == widget.userId;
           return Padding(
             padding: const EdgeInsets.symmetric(horizontal: 8),
@@ -1069,23 +2166,34 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
                   ),
                 );
               },
-              child: Column(
-                children: [
-                  CircleAvatar(
-                    radius: 20,
-                    backgroundColor: isMe ? const Color(0xFF1E90FF) : const Color(0xFFFF6B35),
-                    child: Text(
-                      nick.isNotEmpty ? nick[0].toUpperCase() : '?',
-                      style: const TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.bold),
+              child: Opacity(
+                opacity: (!isMe && _isStale(m)) ? 0.4 : 1.0,
+                child: Column(
+                  children: [
+                    CircleAvatar(
+                      radius: 20,
+                      backgroundColor: isMe ? const Color(0xFF1E90FF) : const Color(0xFFFF6B35),
+                      child: Text(
+                        nick.isNotEmpty ? nick[0].toUpperCase() : '?',
+                        style: const TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.bold),
+                      ),
                     ),
-                  ),
-                  const SizedBox(height: 2),
-                  Text(nick, style: const TextStyle(color: Colors.white, fontSize: 11)),
-                  Text(
-                    isMe ? '自分' : '${dist.toStringAsFixed(1)}km',
-                    style: TextStyle(color: Colors.grey[400], fontSize: 10),
-                  ),
-                ],
+                    const SizedBox(height: 2),
+                    Text(nick, style: const TextStyle(color: Colors.white, fontSize: 11)),
+                    if (isMe)
+                      Text('自分', style: TextStyle(color: Colors.grey[400], fontSize: 10))
+                    else if (_isStale(m))
+                      Text(
+                        _formatElapsed(m),
+                        style: const TextStyle(color: Color(0xFFFFB74D), fontSize: 10),
+                      )
+                    else
+                      Text(
+                        '${dist.toStringAsFixed(1)}km',
+                        style: TextStyle(color: Colors.grey[400], fontSize: 10),
+                      ),
+                  ],
+                ),
               ),
             ),
           );
