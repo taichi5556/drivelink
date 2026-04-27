@@ -947,6 +947,8 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                   if (!mounted || _routePoints.isEmpty) return;
                   _inRouteOverview = false;
                   _currentZoom = 17.0;
+                  // ユーザーが地図操作中（追従停止中）なら強制復帰しない
+                  if (_isFollowingMember) return;
                   if (_headingUp) {
                     _moveCameraWithBearing(_myPosition, _currentBearing);
                   } else {
@@ -1262,11 +1264,11 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
         });
       }
       if (!mounted) return;
-      if (!_inRouteOverview) {
+      // 追従停止中（_isFollowingMember==true）はヘディングアップでもカメラを動かさない
+      if (!_inRouteOverview && !_isFollowingMember && _programmaticCameraMove == 0) {
         if (_headingUp) {
-          // ヘディングアップ時は_isFollowingMemberに関わらず常に追従
           _moveCameraWithBearing(_myPosition, _currentBearing);
-        } else if (!_isFollowingMember && _programmaticCameraMove == 0) {
+        } else {
           _animateCamera(CameraUpdate.newLatLng(_myPosition), programmatic: true);
         }
       }
@@ -1304,10 +1306,11 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
         });
       }
       if (!mounted) return;
-      if (!_inRouteOverview) {
+      // 追従停止中（_isFollowingMember==true）はヘディングアップでもカメラを動かさない
+      if (!_inRouteOverview && !_isFollowingMember && _programmaticCameraMove == 0) {
         if (_headingUp) {
           _moveCameraWithBearing(_myPosition, _currentBearing);
-        } else if (!_isFollowingMember && _programmaticCameraMove == 0) {
+        } else {
           _animateCamera(CameraUpdate.newLatLngZoom(_myPosition, 17.0), programmatic: true);
         }
       }
@@ -1784,6 +1787,47 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
           }
         },
         ),
+        // 現在地に戻るFAB（追従停止中のみ表示・ピル型・中央下）
+        if (_isFollowingMember)
+          Positioned(
+            left: 0,
+            right: 0,
+            bottom: 24,
+            child: Center(
+              child: GestureDetector(
+                onTap: () {
+                  setState(() => _isFollowingMember = false);
+                  _animateCamera(
+                    CameraUpdate.newLatLngZoom(_myPosition, 17.0),
+                    programmatic: true,
+                  );
+                },
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF00D4FF),
+                    borderRadius: BorderRadius.circular(24),
+                    boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 4)],
+                  ),
+                  child: const Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.my_location, color: Colors.white, size: 20),
+                      SizedBox(width: 8),
+                      Text(
+                        '現在地へ戻る',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
         // ヘディングアップ ON/OFF ボタン
         Positioned(
           right: 12,
@@ -1869,7 +1913,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
       child: LayoutBuilder(
         builder: (context, constraints) {
-          const int buttonCount = 5; // 5ボタンに増やす時はここだけ変える
+          const int buttonCount = 4; // 「現在地」はマップ右下FABに移行
           const double spacing = 8.0;
           final double btnWidth =
               ((constraints.maxWidth - spacing * (buttonCount - 1)) / buttonCount)
@@ -1899,17 +1943,6 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                         _updateDestinationMarker();
                       }
                     : _setPersonalDestination,
-                width: btnWidth,
-              ),
-              const SizedBox(width: spacing),
-              _buildActionBtn(
-                icon: Icons.my_location,
-                label: '現在地',
-                color: const Color(0xFF1A3A5C),
-                onTap: () {
-                  setState(() => _isFollowingMember = false);
-                  _animateCamera(CameraUpdate.newLatLngZoom(_myPosition, 17.0), programmatic: true);
-                },
                 width: btnWidth,
               ),
               const SizedBox(width: spacing),
