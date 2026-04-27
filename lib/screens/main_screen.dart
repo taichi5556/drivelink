@@ -68,10 +68,18 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   static const _rerouteThresholdMeters = 50.0;  // 逸脱判定距離
   static const _rerouteCooldownSecs    = 20;     // 再検索間隔（秒）
 
+  // 接続状態判定（last_seen の経過時間がこの値を超えたら「接続切れ」表示）
+  static const _connectionStaleSecs = 60;
+  // メンバーリストUIの経過時間表示を更新する間隔
+  static const _connectionRefreshIntervalSecs = 10;
+
   // 警告ポイント関連
   Map<String, dynamic> _warnings = {};
   StreamSubscription? _warningsSubscription;
   Timer? _warningCleanupTimer;
+
+  // 接続状態UI更新タイマー（last_seen からの経過時間表示を定期リフレッシュ）
+  Timer? _connectionRefreshTimer;
 
   // 通知関連
   int _joinedAt = 0;
@@ -151,6 +159,16 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     _warningCleanupTimer = Timer.periodic(
       const Duration(minutes: 1),
       (_) => _cleanupExpiredWarnings(),
+    );
+    // 接続状態の経過時間表示を定期更新（_membersは触らずsetStateだけ）
+    _connectionRefreshTimer = Timer.periodic(
+      const Duration(seconds: _connectionRefreshIntervalSecs),
+      (_) {
+        if (mounted) {
+          setState(() {});
+          _rebuildMarkers(); // マーカーのalphaも更新
+        }
+      },
     );
     // マップ読み込み完了後に位置共有確認ダイアログを表示
     WidgetsBinding.instance.addPostFrameCallback((_) => _showLocationSharingDialog());
@@ -802,10 +820,12 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       final vehicleType = m['vehicle_type'] as String? ?? 'car';
       final isMe = uid == widget.userId;
       final icon = await _getVehicleMarker(vehicleType, isMe);
+      final stale = !isMe && _isStale(m);
       newMarkers.add(Marker(
         markerId: MarkerId(uid),
         position: LatLng(lat, lng),
         icon: icon,
+        alpha: stale ? 0.35 : 1.0,
         infoWindow: InfoWindow(title: nick),
       ));
     }
@@ -1153,6 +1173,30 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     }
   }
 
+  /// last_seen からの経過秒数を返す。null/不正値は null を返す。
+  int? _secondsSinceLastSeen(Map memberData) {
+    final raw = memberData['last_seen'];
+    if (raw is! num) return null;
+    final lastSeenMs = raw.toInt();
+    final diffMs = DateTime.now().millisecondsSinceEpoch - lastSeenMs;
+    if (diffMs < 0) return 0; // 未来時刻（時計ズレ）→ 0扱い
+    return diffMs ~/ 1000;
+  }
+
+  /// 接続切れ判定（last_seen が無い場合は false=接続中扱い）
+  bool _isStale(Map memberData) {
+    final secs = _secondsSinceLastSeen(memberData);
+    return secs != null && secs >= _connectionStaleSecs;
+  }
+
+  /// 経過時間の表示文字列を返す。60秒未満 or null は空文字。
+  String _formatElapsed(Map memberData) {
+    final secs = _secondsSinceLastSeen(memberData);
+    if (secs == null || secs < _connectionStaleSecs) return '';
+    if (secs < 3600) return '${secs ~/ 60}分前';
+    return '${secs ~/ 3600}時間前';
+  }
+
   void _listenToMembers() {
     _membersSubscription = _db
         .child('rooms/${widget.roomCode}/members')
@@ -1413,6 +1457,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     _countdownTimer?.cancel();
     _expiryTimer?.cancel();
     _warningCleanupTimer?.cancel();
+    _connectionRefreshTimer?.cancel();
     _routeOverviewTimer?.cancel();
     _membersSubscription?.cancel();
     _destSubscription?.cancel();
@@ -1962,25 +2007,34 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
         final lng = (m['lng'] as num).toDouble();
         final dist = _metersTo(LatLng(lat, lng), _myPosition) / 1000;
         final isMe = uid == widget.userId;
-        return ListTile(
-          dense: true,
-          leading: CircleAvatar(
-            radius: 16,
-            backgroundColor: isMe ? const Color(0xFF1E90FF) : const Color(0xFFFF6B35),
-            child: Text(
-              nick.isNotEmpty ? nick[0].toUpperCase() : '?',
-              style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold),
+        final stale = !isMe && _isStale(m);
+        return Opacity(
+          opacity: stale ? 0.4 : 1.0,
+          child: ListTile(
+            dense: true,
+            leading: CircleAvatar(
+              radius: 16,
+              backgroundColor: isMe ? const Color(0xFF1E90FF) : const Color(0xFFFF6B35),
+              child: Text(
+                nick.isNotEmpty ? nick[0].toUpperCase() : '?',
+                style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold),
+              ),
             ),
+            title: Text(nick, style: const TextStyle(color: Colors.white, fontSize: 12)),
+            subtitle: Text(
+              isMe
+                  ? '自分'
+                  : (stale ? _formatElapsed(m) : '${dist.toStringAsFixed(1)}km'),
+              style: TextStyle(
+                color: stale ? const Color(0xFFFFB74D) : Colors.grey[400],
+                fontSize: 10,
+              ),
+            ),
+            onTap: () {
+              setState(() => _isFollowingMember = true);
+              _mapController?.animateCamera(CameraUpdate.newLatLng(LatLng(lat, lng)));
+            },
           ),
-          title: Text(nick, style: const TextStyle(color: Colors.white, fontSize: 12)),
-          subtitle: Text(
-            isMe ? '自分' : '${dist.toStringAsFixed(1)}km',
-            style: TextStyle(color: Colors.grey[400], fontSize: 10),
-          ),
-          onTap: () {
-            setState(() => _isFollowingMember = true);
-            _mapController?.animateCamera(CameraUpdate.newLatLng(LatLng(lat, lng)));
-          },
         );
       },
     );
@@ -2025,23 +2079,34 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                   ),
                 );
               },
-              child: Column(
-                children: [
-                  CircleAvatar(
-                    radius: 20,
-                    backgroundColor: isMe ? const Color(0xFF1E90FF) : const Color(0xFFFF6B35),
-                    child: Text(
-                      nick.isNotEmpty ? nick[0].toUpperCase() : '?',
-                      style: const TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.bold),
+              child: Opacity(
+                opacity: (!isMe && _isStale(m)) ? 0.4 : 1.0,
+                child: Column(
+                  children: [
+                    CircleAvatar(
+                      radius: 20,
+                      backgroundColor: isMe ? const Color(0xFF1E90FF) : const Color(0xFFFF6B35),
+                      child: Text(
+                        nick.isNotEmpty ? nick[0].toUpperCase() : '?',
+                        style: const TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.bold),
+                      ),
                     ),
-                  ),
-                  const SizedBox(height: 2),
-                  Text(nick, style: const TextStyle(color: Colors.white, fontSize: 11)),
-                  Text(
-                    isMe ? '自分' : '${dist.toStringAsFixed(1)}km',
-                    style: TextStyle(color: Colors.grey[400], fontSize: 10),
-                  ),
-                ],
+                    const SizedBox(height: 2),
+                    Text(nick, style: const TextStyle(color: Colors.white, fontSize: 11)),
+                    if (isMe)
+                      Text('自分', style: TextStyle(color: Colors.grey[400], fontSize: 10))
+                    else if (_isStale(m))
+                      Text(
+                        _formatElapsed(m),
+                        style: const TextStyle(color: Color(0xFFFFB74D), fontSize: 10),
+                      )
+                    else
+                      Text(
+                        '${dist.toStringAsFixed(1)}km',
+                        style: TextStyle(color: Colors.grey[400], fontSize: 10),
+                      ),
+                  ],
+                ),
               ),
             ),
           );
