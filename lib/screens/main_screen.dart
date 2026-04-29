@@ -140,13 +140,13 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   // 車両マーカーキャッシュ（vehicleType-isMe → BitmapDescriptor）
   final Map<String, BitmapDescriptor> _markerCache = {};
 
-  // ルート時間吹き出しのキャッシュ（"$durationText|$distanceText|$isSelected" → BitmapDescriptor）
-  final Map<String, BitmapDescriptor> _routeBubbleCache = {};
-
-  // 各ルートの吹き出し配置点キャッシュ（_routes と同じ長さ、添字対応）。
-  // _routes 更新時に _findBestBubblePosition で計算してここに格納し、
-  // _rebuildMarkers ではこの値を参照するだけにすることで毎回の重い計算を回避。
-  List<LatLng> _routeBubblePositions = [];
+  // プレビュー中のルート色（最大3本対応）。0=赤, 1=青, 2=緑。
+  // インデックスがこの長さを超えた場合はモジュロで巡回。
+  static const _previewRouteColors = [
+    Color(0xFFE53935), // 赤
+    Color(0xFF1E88E5), // 青
+    Color(0xFF43A047), // 緑
+  ];
 
 
   // AdMob
@@ -865,141 +865,6 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     return descriptor;
   }
 
-  // 指定ルートで吹き出しを置くのに最適な点を返す。
-  // 各 point について他ルートとの最近傍 Manhattan 距離を求め、
-  // 距離が最大の点を採用（=他ルートから最も離れた地点）。
-  // 同距離の点が複数ある場合は (routeIndex+1)/(N+1) 比率位置に近い方を選ぶ。
-  // ルート1本の場合は単純な比率位置（中央）。
-  // 距離は球面ではなく Manhattan 距離で近似（位置決め用途には十分）。
-  // 重い処理なので _routes 更新時に1回だけ実行し、_routeBubblePositions にキャッシュする。
-  LatLng _findBestBubblePosition(int routeIndex, List<_Route> allRoutes) {
-    final route = allRoutes[routeIndex];
-    if (route.points.isEmpty) return const LatLng(0, 0);
-    final ratio = (routeIndex + 1) / (allRoutes.length + 1);
-    if (allRoutes.length <= 1) {
-      return route.points[(route.points.length * ratio)
-          .floor()
-          .clamp(0, route.points.length - 1)];
-    }
-
-    final n = route.points.length;
-    final targetIdx = (n * ratio).floor().clamp(0, n - 1);
-
-    int bestIdx = -1;
-    double bestScore = -double.infinity;
-    for (int i = 0; i < n; i++) {
-      final p = route.points[i];
-      double minDist = double.infinity;
-      for (int j = 0; j < allRoutes.length; j++) {
-        if (j == routeIndex) continue;
-        for (final q in allRoutes[j].points) {
-          final d = (p.latitude - q.latitude).abs() +
-              (p.longitude - q.longitude).abs();
-          if (d < minDist) minDist = d;
-        }
-      }
-      // スコア: 距離が大きいほど良い（主）、比率位置に近いほど良い（補正）
-      final positionPenalty = (i - targetIdx).abs() / n;
-      final score = minDist - positionPenalty * 0.001;
-      if (score > bestScore) {
-        bestScore = score;
-        bestIdx = i;
-      }
-    }
-
-    return route.points[bestIdx >= 0 ? bestIdx : n ~/ 2];
-  }
-
-  // ルート時間吹き出しのビットマップを生成。
-  // 選択中: オレンジ背景＋白文字 / 代替: 白背景＋黒文字＋オレンジ薄枠線。
-  // 動的幅で TextPainter のサイズに合わせて生成し、imagePixelRatio 2.5 で表示サイズを縮小。
-  Future<BitmapDescriptor> _getRouteBubbleMarker({
-    required String durationText,
-    required String distanceText,
-    required bool isSelected,
-  }) async {
-    final key = '$durationText|$distanceText|$isSelected';
-    final cached = _routeBubbleCache[key];
-    if (cached != null) return cached;
-
-    final label = '$durationText / $distanceText';
-    final textColor = isSelected ? Colors.white : const Color(0xFF1A1A1A);
-    final bgColor = isSelected ? const Color(0xFFFF6B35) : Colors.white;
-
-    final tp = TextPainter(textDirection: TextDirection.ltr)
-      ..text = TextSpan(
-        text: label,
-        style: TextStyle(
-          fontSize: 40,
-          fontWeight: FontWeight.w600,
-          color: textColor,
-        ),
-      )
-      ..layout();
-
-    const padH = 30.0;
-    const padV = 18.0;
-    const radius = 24.0;
-    const shadowPad = 6.0;
-    const pointerW = 16.0;
-    const pointerH = 10.0;
-    final bodyW = tp.width + padH * 2;
-    final bodyH = tp.height + padV * 2;
-    // キャンバス: 上・左右は影の余白、下はポインタ先端を底辺に置く（anchor (0.5, 1.0) と整合）
-    final canvasW = bodyW + shadowPad * 2;
-    final canvasH = shadowPad + bodyH + pointerH;
-    final bodyX = shadowPad;
-    final bodyY = shadowPad;
-    final pointerCx = bodyX + bodyW / 2;
-    final pointerTopY = bodyY + bodyH;
-    final pointerTipY = pointerTopY + pointerH;
-
-    final recorder = ui.PictureRecorder();
-    final canvas = Canvas(recorder);
-
-    // 本体（角丸長方形）+ ポインタ（下向き三角）を結合した単一の Path
-    final bubblePath = Path()
-      ..addRRect(RRect.fromRectAndRadius(
-        Rect.fromLTWH(bodyX, bodyY, bodyW, bodyH),
-        const Radius.circular(radius),
-      ))
-      ..moveTo(pointerCx - pointerW / 2, pointerTopY)
-      ..lineTo(pointerCx + pointerW / 2, pointerTopY)
-      ..lineTo(pointerCx, pointerTipY)
-      ..close();
-
-    // 影（ポインタ含む）
-    canvas.drawShadow(bubblePath, Colors.black54, 4, false);
-
-    // 塗り
-    canvas.drawPath(bubblePath, Paint()..color = bgColor);
-
-    // 代替時はオレンジ薄枠線で識別性を高める（ポインタにも連続）
-    if (!isSelected) {
-      canvas.drawPath(
-        bubblePath,
-        Paint()
-          ..color = const Color(0xFFFF6B35).withValues(alpha: 0.5)
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = 2,
-      );
-    }
-
-    // テキスト
-    tp.paint(canvas, Offset(bodyX + padH, bodyY + padV));
-
-    final picture = recorder.endRecording();
-    final image = await picture.toImage(canvasW.toInt(), canvasH.toInt());
-    final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
-    if (bytes == null) return BitmapDescriptor.defaultMarker;
-    final descriptor = BitmapDescriptor.bytes(
-      bytes.buffer.asUint8List(),
-      imagePixelRatio: 2.5,
-    );
-    _routeBubbleCache[key] = descriptor;
-    return descriptor;
-  }
-
   Future<void> _rebuildMarkers() async {
     // メンバーマーカーを再構築（警告マーカーを含む全マーカーを同期）
     final newMarkers = <Marker>{};
@@ -1053,36 +918,6 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       ));
     });
 
-    // ルート時間吹き出し（各ルートで他ルートから最も離れた点に配置）
-    // 1本でも所要時間・距離が見えると便利なため _routes が空でなければ表示
-    // 配置点は _routes 更新時に _routeBubblePositions にキャッシュ済み
-    for (int i = 0; i < _routes.length; i++) {
-      final pts = _routes[i].points;
-      if (pts.isEmpty) continue;
-      final mid = (i < _routeBubblePositions.length)
-          ? _routeBubblePositions[i]
-          : pts[pts.length ~/ 2];
-      final isSelected = i == _selectedRouteIndex;
-      final bubble = await _getRouteBubbleMarker(
-        durationText: _routes[i].durationText,
-        distanceText: _routes[i].distanceText,
-        isSelected: isSelected,
-      );
-      newMarkers.add(Marker(
-        markerId: MarkerId('route_bubble_$i'),
-        position: mid,
-        icon: bubble,
-        // anchor (0.5, 1.0): 吹き出しの底辺中央を LatLng に合わせ、
-        // 吹き出しを LatLng の真上に伸ばす。
-        // Marker は Polyline より上のレイヤーで描画されるため、
-        // 中心配置だと選択中ルートが大きく隠れる問題への対策。
-        anchor: const Offset(0.5, 1.0),
-        zIndexInt: isSelected ? 10 : 5,
-        onTap: () => _selectRoute(i),
-        consumeTapEvents: true,
-      ));
-    }
-
     if (mounted) {
       setState(() => _markers = newMarkers);
     }
@@ -1100,7 +935,6 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       setState(() {
         _polylines = {};
         _routes = [];
-        _routeBubblePositions = [];
         _selectedRouteIndex = 0;
         _headingUp = false;
       });
@@ -1157,14 +991,8 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
             }
           }
           if (newRoutes.isNotEmpty && mounted) {
-            // 吹き出し配置点をキャッシュ（重い距離計算をここで1回だけ実行）
-            final newBubblePositions = List<LatLng>.generate(
-              newRoutes.length,
-              (i) => _findBestBubblePosition(i, newRoutes),
-            );
             setState(() {
               _routes = newRoutes;
-              _routeBubblePositions = newBubblePositions;
               // コース逸脱再検索後の選択ルート維持。範囲外なら 0 にフォールバック
               if (isRerouting) {
                 if (_selectedRouteIndex >= newRoutes.length) {
@@ -1182,8 +1010,6 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
             });
             debugPrint('[Phase5] ルート構築: ${newRoutes.length}本 (選択中=$_selectedRouteIndex, 通過済み着色=有効)');
             _updatePassedRoute();
-            // ルート時間吹き出しを描画するためマーカーも再構築
-            _rebuildMarkers();
             if (!isRerouting) {
               // 前回のタイマーをキャンセル（5秒以内の再設定時の競合防止）
               _routeOverviewTimer?.cancel();
@@ -1742,62 +1568,66 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     _rebuildPolylines();
   }
 
-  // 全ルートを zIndex 付きで描画。選択中ルートのみ通過済み（灰色）/ 残り（オレンジ）に分割。
-  // 代替ルートは灰色 alpha 0.5 で背面描画、選択中残りは最前面（zIndex 3）。
+  // ルートポリラインを再構築。プレビュー中とナビ中で表示が大きく変わる。
+  // - プレビュー中: 全ルートを 3 色（赤/青/緑）で描画。選択中は太線。
+  // - ナビ中: 選択中ルートのみオレンジで描画（通過済みは灰色）。代替ルートは非表示。
   void _rebuildPolylines() {
     if (!mounted || _routes.isEmpty) return;
     if (_selectedRouteIndex < 0 || _selectedRouteIndex >= _routes.length) return;
     final selectedPoints = _routes[_selectedRouteIndex].points;
     if (selectedPoints.isEmpty) return;
 
-    // 選択中ルートの通過済み判定（現在地から最も近い点のインデックス）
-    int closestIdx = 0;
-    double minDist = double.infinity;
-    for (int i = 0; i < selectedPoints.length; i++) {
-      final d = _metersTo(_myPosition, selectedPoints[i]);
-      if (d < minDist) {
-        minDist = d;
-        closestIdx = i;
-      }
-    }
-    final passed = selectedPoints.sublist(0, closestIdx + 1);
-    final remaining = selectedPoints.sublist(closestIdx);
-
     final newPolylines = <Polyline>{};
 
-    // 1) 代替ルート（背面、zIndex 1）
-    // 色: 選択中 (#FF6B35) と同系統の薄いオレンジで「ルートと識別できる」&「選択中と区別できる」を両立
-    for (int i = 0; i < _routes.length; i++) {
-      if (i == _selectedRouteIndex) continue;
-      newPolylines.add(Polyline(
-        polylineId: PolylineId('route_$i'),
-        points: _routes[i].points,
-        color: const Color(0xFFFFB89A),
-        width: 5,
-        zIndex: 1,
-      ));
-    }
+    if (_isRoutePreview) {
+      // プレビュー中: 全ルートを 3 色で描画。選択中を太線＋前面、代替を細線＋背面。
+      for (int i = 0; i < _routes.length; i++) {
+        final pts = _routes[i].points;
+        if (pts.length < 2) continue;
+        final isSelected = i == _selectedRouteIndex;
+        final color = _previewRouteColors[i % _previewRouteColors.length];
+        newPolylines.add(Polyline(
+          polylineId: PolylineId('route_$i'),
+          points: pts,
+          color: color,
+          width: isSelected ? 8 : 5,
+          zIndex: isSelected ? 3 : 1,
+        ));
+      }
+    } else {
+      // ナビ中: 選択中ルートの通過済み判定（現在地から最も近い点のインデックス）
+      int closestIdx = 0;
+      double minDist = double.infinity;
+      for (int i = 0; i < selectedPoints.length; i++) {
+        final d = _metersTo(_myPosition, selectedPoints[i]);
+        if (d < minDist) {
+          minDist = d;
+          closestIdx = i;
+        }
+      }
+      final passed = selectedPoints.sublist(0, closestIdx + 1);
+      final remaining = selectedPoints.sublist(closestIdx);
 
-    // 2) 選択中ルートの通過済み（中間、zIndex 2）
-    if (passed.length >= 2) {
-      newPolylines.add(Polyline(
-        polylineId: PolylineId('route_${_selectedRouteIndex}_passed'),
-        points: passed,
-        color: Colors.grey.withValues(alpha: 0.35),
-        width: 5,
-        zIndex: 2,
-      ));
-    }
-
-    // 3) 選択中ルートの残り（最前面、zIndex 3）
-    if (remaining.length >= 2) {
-      newPolylines.add(Polyline(
-        polylineId: PolylineId('route_${_selectedRouteIndex}_remaining'),
-        points: remaining,
-        color: const Color(0xFFFF6B35),
-        width: 6,
-        zIndex: 3,
-      ));
+      // 通過済み（灰色、中間）
+      if (passed.length >= 2) {
+        newPolylines.add(Polyline(
+          polylineId: PolylineId('route_${_selectedRouteIndex}_passed'),
+          points: passed,
+          color: Colors.grey.withValues(alpha: 0.35),
+          width: 5,
+          zIndex: 2,
+        ));
+      }
+      // 残り（オレンジ、最前面）
+      if (remaining.length >= 2) {
+        newPolylines.add(Polyline(
+          polylineId: PolylineId('route_${_selectedRouteIndex}_remaining'),
+          points: remaining,
+          color: const Color(0xFFFF6B35),
+          width: 6,
+          zIndex: 3,
+        ));
+      }
     }
 
     setState(() => _polylines = newPolylines);
@@ -2273,17 +2103,71 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
               ),
             ),
           ),
+        // プレビュー中: 画面右端に縦並びでルート選択吹き出しを表示。
+        // 各吹き出しの色は対応するルート色（赤/青/緑）と一致させる。
+        // 選択中は白い太枠線で強調。タップで _selectRoute(i)。
+        if (_isRoutePreview && _routes.isNotEmpty)
+          Positioned(
+            right: 12,
+            top: 0,
+            bottom: 0,
+            child: Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  for (int i = 0; i < _routes.length; i++)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 4),
+                      child: GestureDetector(
+                        onTap: () => _selectRoute(i),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                          decoration: BoxDecoration(
+                            color: _previewRouteColors[i % _previewRouteColors.length],
+                            borderRadius: BorderRadius.circular(14),
+                            border: i == _selectedRouteIndex
+                                ? Border.all(color: Colors.white, width: 3)
+                                : null,
+                            boxShadow: const [BoxShadow(color: Colors.black38, blurRadius: 6)],
+                          ),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            crossAxisAlignment: CrossAxisAlignment.end,
+                            children: [
+                              Text(
+                                _routes[i].durationText,
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 18,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                              Text(
+                                _routes[i].distanceText,
+                                style: const TextStyle(
+                                  color: Colors.white70,
+                                  fontSize: 13,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
       ],
     );
   }
 
-  // 吹き出しタップで選択中ルートを切替。polyline と markers を再構築。
+  // 吹き出しタップで選択中ルートを切替。polyline のみ再構築（吹き出しは Widget なので setState で自動更新）。
   void _selectRoute(int index) {
     if (index < 0 || index >= _routes.length) return;
     if (index == _selectedRouteIndex) return;
     setState(() => _selectedRouteIndex = index);
     _rebuildPolylines();
-    _rebuildMarkers();
   }
 
   // ナビ開始処理（共通ヘルパー）。
@@ -2297,6 +2181,8 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       _inRouteOverview = false;
       _currentZoom = 17.0;
     });
+    // プレビュー（3色） → ナビ（選択ルートのみオレンジ）に切替
+    _rebuildPolylines();
     _routeOverviewTimer?.cancel();
     if (_headingUp) {
       _moveCameraWithBearing(_myPosition, _currentBearing);
@@ -2323,7 +2209,6 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       _isShared = false;
       _polylines = {};
       _routes = [];
-      _routeBubblePositions = [];
       _selectedRouteIndex = 0;
       _headingUp = false;
       _inRouteOverview = false;
@@ -2490,7 +2375,6 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                           _groupDestName = '';
                           _polylines = {};
                           _routes = [];
-                          _routeBubblePositions = [];
                           _selectedRouteIndex = 0;
                           _headingUp = false;
                           _isRoutePreview = false;
