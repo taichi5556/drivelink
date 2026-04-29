@@ -75,6 +75,11 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   // トグル切替時のデバウンス用タイマー（500ms 後に Firebase 書き込み + 再検索）
   Timer? _routePreferenceDebounceTimer;
 
+  // 目的地候補をタップしてルート描画した直後の「プレビュー中」フラグ。
+  // true の間は「このルートで出発」「やめる」フローティングを表示し、
+  // トグル切替時の Firebase 書き込みをスキップする（ローカルの再検索だけ走らせる）。
+  bool _isRoutePreview = false;
+
   // ルート逸脱自動再検索
   DateTime? _lastRerouteTime;     // API 成功時刻（クールダウン基準）
   bool _rerouteInFlight = false;  // 再検索 API 応答待ちガード（多重発火防止）
@@ -416,6 +421,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
           _groupDestination = null;
           _groupDestName = '';
           _routePreference = 'highway';
+          _isRoutePreview = false;
         });
         _updateDestinationMarker();
         return;
@@ -434,9 +440,12 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       if (lat == null || lng == null) return;
       final newDest = LatLng(lat, lng);
       if (senderUid != widget.userId) {
+        // 他メンバーが共有した目的地を受信したらプレビューを強制解除
+        // （自分が候補をプレビュー中でも、他者が先に共有を確定したら確定状態に遷移）
         setState(() {
           _groupDestination = newDest;
           _groupDestName = name;
+          _isRoutePreview = false;
         });
         _updateDestinationMarker();
         _saveDestHistory(name, lat, lng);
@@ -1107,6 +1116,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       setState(() {
         _groupDestination = LatLng(lat, lng);
         _groupDestName = name;
+        _isRoutePreview = true;
       });
       _updateDestinationMarker();
       _saveDestHistory(name, lat, lng);
@@ -1223,6 +1233,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                     setState(() {
                       _groupDestination = _myPosition;
                       _groupDestName = '現在地';
+                      _isRoutePreview = true;
                     });
                     _updateDestinationMarker();
                     Navigator.pop(ctx);
@@ -1270,6 +1281,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       'routePreference': _routePreference,
     });
     if (mounted) {
+      setState(() => _isRoutePreview = false);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('📍 「$name」をグループに共有しました'), backgroundColor: const Color(0xFF1A3A5C)),
       );
@@ -1896,6 +1908,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
             setState(() {
               _groupDestination = latLng;
               _groupDestName = name;
+              _isRoutePreview = true;
             });
             _updateDestinationMarker();
             _saveDestHistory(name, latLng.latitude, latLng.longitude);
@@ -1994,20 +2007,101 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
             ),
           ),
         ),
+        // プレビュー中のみ表示するフローティングアクション。
+        // 「このルートで出発」= Firebase 共有でグループに確定 / 「やめる」= ローカル破棄して再検索ダイアログ
+        if (_isRoutePreview && _groupDestination != null)
+          Positioned(
+            left: 0,
+            right: 0,
+            bottom: 90,
+            child: Center(
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  GestureDetector(
+                    onTap: _shareGroupDestination,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFFF6B35),
+                        borderRadius: BorderRadius.circular(24),
+                        boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 4)],
+                      ),
+                      child: const Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.navigation, color: Colors.white, size: 20),
+                          SizedBox(width: 8),
+                          Text(
+                            'このルートで出発',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 14,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  GestureDetector(
+                    onTap: _cancelRoutePreview,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF1A3A5C).withValues(alpha: 0.95),
+                        borderRadius: BorderRadius.circular(24),
+                        boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 4)],
+                      ),
+                      child: const Text(
+                        'やめる',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
       ],
     );
   }
 
+  // プレビューを破棄して目的地検索ダイアログを再表示する。
+  // _groupDestination をローカルでクリアするだけで Firebase には触れない
+  // （プレビュー中は元々書き込んでいないため、他メンバーへの影響はない）。
+  void _cancelRoutePreview() {
+    setState(() {
+      _groupDestination = null;
+      _groupDestName = '';
+      _isRoutePreview = false;
+      _polylines = {};
+      _routes = [];
+      _selectedRouteIndex = 0;
+      _headingUp = false;
+    });
+    _updateDestinationMarker();
+    _setPersonalDestination();
+  }
+
   // トグルタップハンドラ：500ms デバウンス後に Firebase 書き込み + 即再検索
   // クールダウン無視で即発火するため _fetchRoute に force: true を渡す
+  // プレビュー中は Firebase 書き込みをスキップし、ローカル再検索のみ走らせる
   void _onRoutePreferenceToggle(String newPref) {
     if (_routePreference == newPref) return;
     setState(() => _routePreference = newPref);
     _routePreferenceDebounceTimer?.cancel();
     _routePreferenceDebounceTimer = Timer(const Duration(milliseconds: 500), () {
       if (!mounted) return;
-      debugPrint('[Phase4] トグル → preference=$newPref (debounced)');
-      _persistRoutePreference();
+      debugPrint('[Phase6] トグル → preference=$newPref (debounced, preview=$_isRoutePreview)');
+      if (!_isRoutePreview) {
+        _persistRoutePreference();
+      }
       if (_groupDestination != null) {
         _fetchRoute(_groupDestination!, isRerouting: true, force: true);
       }
@@ -2128,7 +2222,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
       child: LayoutBuilder(
         builder: (context, constraints) {
-          const int buttonCount = 4; // 「現在地」はマップ右下FABに移行
+          const int buttonCount = 3; // 「ルート共有」はプレビュー中フローティングへ移行、「現在地」は右下FAB
           const double spacing = 8.0;
           final double btnWidth =
               ((constraints.maxWidth - spacing * (buttonCount - 1)) / buttonCount)
@@ -2159,16 +2253,6 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                         _updateDestinationMarker();
                       }
                     : _setPersonalDestination,
-                width: btnWidth,
-              ),
-              const SizedBox(width: spacing),
-              _buildActionBtn(
-                icon: Icons.share,
-                label: 'ルート共有',
-                color: _groupDestination != null
-                    ? const Color(0xFF00D4FF)
-                    : Colors.grey.shade800,
-                onTap: _groupDestination != null ? _shareGroupDestination : null,
                 width: btnWidth,
               ),
               const SizedBox(width: spacing),
