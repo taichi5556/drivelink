@@ -68,6 +68,10 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   LatLng? get _activeDestination => _groupDestination;
   String get _activeDestName => _groupDestName;
 
+  // ルート優先度（'highway' = 高速優先 / 'local' = 下道優先）
+  // Phase 2 で Firebase destination ノードと同期予定。現状はローカル既定値のみ。
+  String _routePreference = 'highway';
+
   // ルート逸脱自動再検索
   DateTime? _lastRerouteTime;     // API 成功時刻（クールダウン基準）
   bool _rerouteInFlight = false;  // 再検索 API 応答待ちガード（多重発火防止）
@@ -906,9 +910,10 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     try {
       final origin = '${_myPosition.latitude},${_myPosition.longitude}';
       final destination = '${dest.latitude},${dest.longitude}';
+      final avoidParam = _routePreference == 'local' ? '&avoid=highways' : '';
       final url = 'https://maps.googleapis.com/maps/api/directions/json'
           '?origin=$origin&destination=$destination'
-          '&mode=driving&language=ja&key=$apiKey';
+          '&mode=driving&language=ja&alternatives=true$avoidParam&key=$apiKey';
       final client = HttpClient();
       try {
         final request = await client.getUrl(Uri.parse(url));
@@ -917,6 +922,15 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
         final data = jsonDecode(body);
         final status = data['status'] as String?;
         if (status == 'OK') {
+          final routes = data['routes'] as List;
+          debugPrint('[Phase1] ルート取得: ${routes.length}本 (preference=$_routePreference)');
+          for (int i = 0; i < routes.length; i++) {
+            final leg = routes[i]['legs'][0];
+            final summary = routes[i]['summary'];
+            final duration = leg['duration']['text'];
+            final distance = leg['distance']['text'];
+            debugPrint('[Phase1]   [$i] summary="$summary" / $duration / $distance');
+          }
           final steps = data['routes'][0]['legs'][0]['steps'] as List;
           final allCoords = <LatLng>[];
           for (final step in steps) {
