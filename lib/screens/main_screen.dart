@@ -1138,6 +1138,9 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
         _groupDestination = LatLng(lat, lng);
         _groupDestName = name;
         _isRoutePreview = true;
+        // 新規目的地検索時は「高速優先」にリセット。
+        // 前回「下道優先」のまま検索すると意図せず狭い道が選ばれることがあるため。
+        _routePreference = 'highway';
       });
       _updateDestinationMarker();
       _saveDestHistory(name, lat, lng);
@@ -1255,6 +1258,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                       _groupDestination = _myPosition;
                       _groupDestName = '現在地';
                       _isRoutePreview = true;
+                      _routePreference = 'highway';
                     });
                     _updateDestinationMarker();
                     Navigator.pop(ctx);
@@ -1944,6 +1948,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
               _groupDestination = latLng;
               _groupDestName = name;
               _isRoutePreview = true;
+              _routePreference = 'highway';
             });
             _updateDestinationMarker();
             _saveDestHistory(name, latLng.latitude, latLng.longitude);
