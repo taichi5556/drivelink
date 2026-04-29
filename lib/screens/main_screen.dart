@@ -148,6 +148,25 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     Color(0xFF43A047), // 緑
   ];
 
+  // 逸脱判定調査用ログバッファ。最新200行保持。アプリ内ログ画面で表示。
+  // 公開版にも入れて常時収集（メモリ消費は微小）。表示のオン/オフは _debugLogEnabled で制御。
+  final List<String> _debugLogBuffer = [];
+  static const int _debugLogMaxLines = 200;
+
+  // 隠しデバッグメニュー（TouriLink ロゴ10回タップで解禁/無効）。
+  // バグアイコン・位置オーバーライドボタン等の表示制御。
+  bool _debugLogEnabled = false;
+  int _debugTapCount = 0;
+  DateTime? _lastDebugTapTime;
+
+  void _appendDebugLog(String msg) {
+    final timestamp = DateTime.now().toIso8601String().substring(11, 19);
+    _debugLogBuffer.add('$timestamp $msg');
+    if (_debugLogBuffer.length > _debugLogMaxLines) {
+      _debugLogBuffer.removeAt(0);
+    }
+  }
+
 
   // AdMob
   BannerAd? _bannerAd;
@@ -1009,6 +1028,13 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
               }
             });
             debugPrint('[Phase5] ルート構築: ${newRoutes.length}本 (選択中=$_selectedRouteIndex, 通過済み着色=有効)');
+            // [DEBUG-TEMP] 再検索完了ログ
+            if (isRerouting) {
+              final selPts = _selectedRouteIndex < newRoutes.length
+                  ? newRoutes[_selectedRouteIndex].points.length
+                  : 0;
+              _appendDebugLog('[再検索完了] routes=${newRoutes.length}本 / 選択中=$_selectedRouteIndex / pts=$selPts');
+            }
             _updatePassedRoute();
             if (!isRerouting) {
               // 前回のタイマーをキャンセル（5秒以内の再設定時の競合防止）
@@ -1475,28 +1501,47 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   }
 
   void _checkRouteDeviation() {
-    if (_routePoints.isEmpty || _groupDestination == null) return;
+    if (_routePoints.isEmpty || _groupDestination == null) {
+      final msg = '[逸脱] skip: empty=${_routePoints.isEmpty}, destNull=${_groupDestination == null}';
+      debugPrint(msg);
+      _appendDebugLog(msg);
+      return;
+    }
 
     // 再検索 API 応答待ち中はスキップ（多重発火防止）
-    if (_rerouteInFlight) return;
+    if (_rerouteInFlight) {
+      debugPrint('[逸脱] skip: inFlight');
+      _appendDebugLog('[逸脱] skip: inFlight');
+      return;
+    }
 
     // クールダウン中はスキップ（成功時のみ消費される）
     final now = DateTime.now();
     if (_lastRerouteTime != null &&
         now.difference(_lastRerouteTime!).inSeconds < _rerouteCooldownSecs) {
+      debugPrint('[逸脱] skip: cooldown');
+      _appendDebugLog('[逸脱] skip: cooldown');
       return;
     }
 
     final points = _routePoints;
-    if (points.isEmpty) return;
+    if (points.isEmpty) {
+      debugPrint('[逸脱] skip: points空（getter経由 - 異常）');
+      _appendDebugLog('[逸脱] skip: points空（getter経由 - 異常）');
+      return;
+    }
 
     final dist = _distanceToPolyline(_myPosition, points);
     // 速度連動の動的閾値：50km/h以上は80m（高速並行誤検知抑制）、未満は30m（市街地で機敏に）
     final threshold = _currentSpeed >= _rerouteSpeedThresholdMps
         ? _rerouteThresholdHighSpeedMeters
         : _rerouteThresholdLowSpeedMeters;
+    final detLog = '[逸脱判定] dist=${dist.toStringAsFixed(0)}m / thr=${threshold.toStringAsFixed(0)}m / 速度=${(_currentSpeed * 3.6).toStringAsFixed(1)}km/h / pts=${points.length}';
+    debugPrint(detLog);
+    _appendDebugLog(detLog);
     if (dist > threshold) {
-      debugPrint('ルート逸脱検知: ${dist.toStringAsFixed(0)}m (閾値=${threshold.toStringAsFixed(0)}m, 速度=${(_currentSpeed * 3.6).toStringAsFixed(1)}km/h) → 再検索');
+      debugPrint('[逸脱] 検知 → 再検索');
+      _appendDebugLog('[逸脱] 検知 → 再検索');
       _fetchRoute(_groupDestination!, isRerouting: true);
     }
   }
@@ -1746,13 +1791,25 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('TouriLink',
-                style: GoogleFonts.audiowide(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
+            // TouriLink ロゴ：10回連打で隠しデバッグメニュー解禁/無効を切替
+            GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: _onLogoTapped,
+              child: Text('TouriLink',
+                  style: GoogleFonts.audiowide(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
+            ),
             Text('ルーム: ${widget.roomCode} | ${_members.length}人が走行中',
                 style: const TextStyle(color: Colors.grey, fontSize: 12)),
           ],
         ),
         actions: [
+          // 隠しデバッグメニュー（TouriLink ロゴ10回タップで解禁時のみ表示）
+          if (_debugLogEnabled)
+            IconButton(
+              tooltip: '逸脱判定ログ',
+              icon: const Icon(Icons.bug_report, color: Colors.purple),
+              onPressed: _showDebugLogDialog,
+            ),
           // 位置共有スイッチ（GPSラベル付き）
           Row(
             mainAxisSize: MainAxisSize.min,
@@ -2164,6 +2221,73 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
             ),
           ),
       ],
+    );
+  }
+
+  // TouriLink ロゴ10回連打で隠しデバッグメニューの有効/無効を切替。
+  // 直近2秒以内の連続タップのみカウントし、それ以外でリセット。
+  void _onLogoTapped() {
+    final now = DateTime.now();
+    if (_lastDebugTapTime != null &&
+        now.difference(_lastDebugTapTime!).inSeconds > 2) {
+      _debugTapCount = 0;
+    }
+    _debugTapCount++;
+    _lastDebugTapTime = now;
+
+    if (_debugTapCount >= 10) {
+      setState(() {
+        _debugLogEnabled = !_debugLogEnabled;
+        _debugTapCount = 0;
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(_debugLogEnabled ? '🐛 デバッグメニュー有効' : 'デバッグメニュー無効'),
+            duration: const Duration(seconds: 1),
+            backgroundColor: const Color(0xFF1A3A5C),
+          ),
+        );
+      }
+    }
+  }
+
+  // 逸脱判定ログ画面（隠しデバッグメニュー）
+  void _showDebugLogDialog() {
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('逸脱判定ログ（新しい順）'),
+        content: SizedBox(
+          width: double.maxFinite,
+          height: 400,
+          child: _debugLogBuffer.isEmpty
+              ? const Center(child: Text('（ログ未取得）'))
+              : ListView.builder(
+                  itemCount: _debugLogBuffer.length,
+                  itemBuilder: (c, i) => Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 1),
+                    child: Text(
+                      _debugLogBuffer[_debugLogBuffer.length - 1 - i],
+                      style: const TextStyle(fontSize: 11, fontFamily: 'monospace'),
+                    ),
+                  ),
+                ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              setState(() => _debugLogBuffer.clear());
+              Navigator.pop(ctx);
+            },
+            child: const Text('クリア'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('閉じる'),
+          ),
+        ],
+      ),
     );
   }
 
