@@ -143,6 +143,11 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   // ルート時間吹き出しのキャッシュ（"$durationText|$distanceText|$isSelected" → BitmapDescriptor）
   final Map<String, BitmapDescriptor> _routeBubbleCache = {};
 
+  // 各ルートの吹き出し配置点キャッシュ（_routes と同じ長さ、添字対応）。
+  // _routes 更新時に _findBestBubblePosition で計算してここに格納し、
+  // _rebuildMarkers ではこの値を参照するだけにすることで毎回の重い計算を回避。
+  List<LatLng> _routeBubblePositions = [];
+
 
   // AdMob
   BannerAd? _bannerAd;
@@ -860,69 +865,49 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     return descriptor;
   }
 
-  // 指定ルートが他のどのルートとも被らない「ユニーク区間」の最長連続セグメント上に
-  // ルートインデックスごとに分散させた比率位置を返す。
-  // 比率は (routeIndex + 1) / (N + 1) で 3本なら 25%/50%/75%、2本なら 33%/67%、1本なら 50%。
-  // ユニーク区間が無い／ルート1本の場合も同じ比率で全 points 上に配置（重なり軽減）。
-  // 距離は球面ではなく緯度経度の Manhattan 距離で近似（位置決め用途には十分）。
-  LatLng _findUniqueRouteMidpoint(int routeIndex, List<_Route> allRoutes) {
+  // 指定ルートで吹き出しを置くのに最適な点を返す。
+  // 各 point について他ルートとの最近傍 Manhattan 距離を求め、
+  // 距離が最大の点を採用（=他ルートから最も離れた地点）。
+  // 同距離の点が複数ある場合は (routeIndex+1)/(N+1) 比率位置に近い方を選ぶ。
+  // ルート1本の場合は単純な比率位置（中央）。
+  // 距離は球面ではなく Manhattan 距離で近似（位置決め用途には十分）。
+  // 重い処理なので _routes 更新時に1回だけ実行し、_routeBubblePositions にキャッシュする。
+  LatLng _findBestBubblePosition(int routeIndex, List<_Route> allRoutes) {
     final route = allRoutes[routeIndex];
     if (route.points.isEmpty) return const LatLng(0, 0);
     final ratio = (routeIndex + 1) / (allRoutes.length + 1);
     if (allRoutes.length <= 1) {
-      return route.points[(route.points.length * ratio).floor()
+      return route.points[(route.points.length * ratio)
+          .floor()
           .clamp(0, route.points.length - 1)];
     }
 
-    const double thresholdDeg = 0.005; // 約500m相当
+    final n = route.points.length;
+    final targetIdx = (n * ratio).floor().clamp(0, n - 1);
 
-    final isUnique = List<bool>.filled(route.points.length, false);
-    for (int i = 0; i < route.points.length; i++) {
+    int bestIdx = -1;
+    double bestScore = -double.infinity;
+    for (int i = 0; i < n; i++) {
       final p = route.points[i];
-      bool unique = true;
+      double minDist = double.infinity;
       for (int j = 0; j < allRoutes.length; j++) {
         if (j == routeIndex) continue;
-        double minDist = double.infinity;
         for (final q in allRoutes[j].points) {
           final d = (p.latitude - q.latitude).abs() +
               (p.longitude - q.longitude).abs();
           if (d < minDist) minDist = d;
-          if (minDist < thresholdDeg) break;
-        }
-        if (minDist < thresholdDeg) {
-          unique = false;
-          break;
         }
       }
-      isUnique[i] = unique;
-    }
-
-    int bestStart = -1;
-    int bestLen = 0;
-    int curStart = -1;
-    int curLen = 0;
-    for (int i = 0; i < isUnique.length; i++) {
-      if (isUnique[i]) {
-        if (curStart < 0) curStart = i;
-        curLen++;
-        if (curLen > bestLen) {
-          bestLen = curLen;
-          bestStart = curStart;
-        }
-      } else {
-        curStart = -1;
-        curLen = 0;
+      // スコア: 距離が大きいほど良い（主）、比率位置に近いほど良い（補正）
+      final positionPenalty = (i - targetIdx).abs() / n;
+      final score = minDist - positionPenalty * 0.001;
+      if (score > bestScore) {
+        bestScore = score;
+        bestIdx = i;
       }
     }
 
-    if (bestStart < 0) {
-      // ユニーク区間なし → 全 points 上で比率位置にフォールバック
-      return route.points[(route.points.length * ratio).floor()
-          .clamp(0, route.points.length - 1)];
-    }
-    // ユニーク区間内の比率位置
-    final offsetInSegment = (bestLen * ratio).floor().clamp(0, bestLen - 1);
-    return route.points[bestStart + offsetInSegment];
+    return route.points[bestIdx >= 0 ? bestIdx : n ~/ 2];
   }
 
   // ルート時間吹き出しのビットマップを生成。
@@ -955,35 +940,44 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     const padH = 30.0;
     const padV = 18.0;
     const radius = 24.0;
-    final w = tp.width + padH * 2;
-    final h = tp.height + padV * 2;
-    // 影の余白を含めたキャンバスサイズ
     const shadowPad = 6.0;
-    final canvasW = w + shadowPad * 2;
-    final canvasH = h + shadowPad * 2;
+    const pointerW = 16.0;
+    const pointerH = 10.0;
+    final bodyW = tp.width + padH * 2;
+    final bodyH = tp.height + padV * 2;
+    // キャンバス: 上・左右は影の余白、下はポインタ先端を底辺に置く（anchor (0.5, 1.0) と整合）
+    final canvasW = bodyW + shadowPad * 2;
+    final canvasH = shadowPad + bodyH + pointerH;
+    final bodyX = shadowPad;
+    final bodyY = shadowPad;
+    final pointerCx = bodyX + bodyW / 2;
+    final pointerTopY = bodyY + bodyH;
+    final pointerTipY = pointerTopY + pointerH;
 
     final recorder = ui.PictureRecorder();
     final canvas = Canvas(recorder);
 
-    // 影
-    final shadowPath = Path()
+    // 本体（角丸長方形）+ ポインタ（下向き三角）を結合した単一の Path
+    final bubblePath = Path()
       ..addRRect(RRect.fromRectAndRadius(
-        Rect.fromLTWH(shadowPad, shadowPad + 2, w, h),
+        Rect.fromLTWH(bodyX, bodyY, bodyW, bodyH),
         const Radius.circular(radius),
-      ));
-    canvas.drawShadow(shadowPath, Colors.black54, 4, false);
+      ))
+      ..moveTo(pointerCx - pointerW / 2, pointerTopY)
+      ..lineTo(pointerCx + pointerW / 2, pointerTopY)
+      ..lineTo(pointerCx, pointerTipY)
+      ..close();
 
-    // 背景
-    final rect = Rect.fromLTWH(shadowPad, shadowPad, w, h);
-    canvas.drawRRect(
-      RRect.fromRectAndRadius(rect, const Radius.circular(radius)),
-      Paint()..color = bgColor,
-    );
+    // 影（ポインタ含む）
+    canvas.drawShadow(bubblePath, Colors.black54, 4, false);
 
-    // 代替時はオレンジ薄枠線で識別性を高める
+    // 塗り
+    canvas.drawPath(bubblePath, Paint()..color = bgColor);
+
+    // 代替時はオレンジ薄枠線で識別性を高める（ポインタにも連続）
     if (!isSelected) {
-      canvas.drawRRect(
-        RRect.fromRectAndRadius(rect, const Radius.circular(radius)),
+      canvas.drawPath(
+        bubblePath,
         Paint()
           ..color = const Color(0xFFFF6B35).withValues(alpha: 0.5)
           ..style = PaintingStyle.stroke
@@ -992,7 +986,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     }
 
     // テキスト
-    tp.paint(canvas, Offset(shadowPad + padH, shadowPad + padV));
+    tp.paint(canvas, Offset(bodyX + padH, bodyY + padV));
 
     final picture = recorder.endRecording();
     final image = await picture.toImage(canvasW.toInt(), canvasH.toInt());
@@ -1059,12 +1053,15 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       ));
     });
 
-    // ルート時間吹き出し（各ルートのユニーク区間の中央に1つずつ配置）
+    // ルート時間吹き出し（各ルートで他ルートから最も離れた点に配置）
     // 1本でも所要時間・距離が見えると便利なため _routes が空でなければ表示
+    // 配置点は _routes 更新時に _routeBubblePositions にキャッシュ済み
     for (int i = 0; i < _routes.length; i++) {
       final pts = _routes[i].points;
       if (pts.isEmpty) continue;
-      final mid = _findUniqueRouteMidpoint(i, _routes);
+      final mid = (i < _routeBubblePositions.length)
+          ? _routeBubblePositions[i]
+          : pts[pts.length ~/ 2];
       final isSelected = i == _selectedRouteIndex;
       final bubble = await _getRouteBubbleMarker(
         durationText: _routes[i].durationText,
@@ -1103,6 +1100,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       setState(() {
         _polylines = {};
         _routes = [];
+        _routeBubblePositions = [];
         _selectedRouteIndex = 0;
         _headingUp = false;
       });
@@ -1159,8 +1157,14 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
             }
           }
           if (newRoutes.isNotEmpty && mounted) {
+            // 吹き出し配置点をキャッシュ（重い距離計算をここで1回だけ実行）
+            final newBubblePositions = List<LatLng>.generate(
+              newRoutes.length,
+              (i) => _findBestBubblePosition(i, newRoutes),
+            );
             setState(() {
               _routes = newRoutes;
+              _routeBubblePositions = newBubblePositions;
               // コース逸脱再検索後の選択ルート維持。範囲外なら 0 にフォールバック
               if (isRerouting) {
                 if (_selectedRouteIndex >= newRoutes.length) {
@@ -2319,6 +2323,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       _isShared = false;
       _polylines = {};
       _routes = [];
+      _routeBubblePositions = [];
       _selectedRouteIndex = 0;
       _headingUp = false;
       _inRouteOverview = false;
@@ -2485,6 +2490,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                           _groupDestName = '';
                           _polylines = {};
                           _routes = [];
+                          _routeBubblePositions = [];
                           _selectedRouteIndex = 0;
                           _headingUp = false;
                           _isRoutePreview = false;
