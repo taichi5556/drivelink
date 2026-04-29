@@ -937,16 +937,16 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       ..text = TextSpan(
         text: label,
         style: TextStyle(
-          fontSize: 26,
+          fontSize: 40,
           fontWeight: FontWeight.w600,
           color: textColor,
         ),
       )
       ..layout();
 
-    const padH = 24.0;
-    const padV = 14.0;
-    const radius = 20.0;
+    const padH = 30.0;
+    const padV = 18.0;
+    const radius = 24.0;
     final w = tp.width + padH * 2;
     final h = tp.height + padV * 2;
     // 影の余白を含めたキャンバスサイズ
