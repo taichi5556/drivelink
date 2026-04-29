@@ -69,11 +69,11 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   String get _activeDestName => _groupDestName;
 
   // ルート優先度（'highway' = 高速優先 / 'local' = 下道優先）
-  // Firebase destination ノードと双方向同期。
+  // Firebase destination ノードと双方向同期。トグル UI のソースオブトゥルース。
   String _routePreference = 'highway';
 
-  // Phase 3: トグル UI の見た目専用フラグ（Phase 4 で _routePreference に統合予定）
-  bool _routeToggleVisualState = true; // true = 高速優先表示, false = 下道優先表示
+  // トグル切替時のデバウンス用タイマー（500ms 後に Firebase 書き込み + 再検索）
+  Timer? _routePreferenceDebounceTimer;
 
   // ルート逸脱自動再検索
   DateTime? _lastRerouteTime;     // API 成功時刻（クールダウン基準）
@@ -911,8 +911,8 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     _rebuildMarkers();
   }
 
-  Future<bool> _fetchRoute(LatLng dest, {bool isRerouting = false}) async {
-    if (isRerouting && _rerouteInFlight) return false;
+  Future<bool> _fetchRoute(LatLng dest, {bool isRerouting = false, bool force = false}) async {
+    if (isRerouting && !force && _rerouteInFlight) return false;
     if (isRerouting) _rerouteInFlight = true;
 
     const apiKey = 'AIzaSyChuUZypiVhojgCO6ZgZML-ZW3eYLtti5c';
@@ -1548,6 +1548,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     _warningCleanupTimer?.cancel();
     _connectionRefreshTimer?.cancel();
     _routeOverviewTimer?.cancel();
+    _routePreferenceDebounceTimer?.cancel();
     _membersSubscription?.cancel();
     _destSubscription?.cancel();
     _warningsSubscription?.cancel();
@@ -1949,8 +1950,32 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     );
   }
 
+  // トグルタップハンドラ：500ms デバウンス後に Firebase 書き込み + 即再検索
+  // クールダウン無視で即発火するため _fetchRoute に force: true を渡す
+  void _onRoutePreferenceToggle(String newPref) {
+    if (_routePreference == newPref) return;
+    setState(() => _routePreference = newPref);
+    _routePreferenceDebounceTimer?.cancel();
+    _routePreferenceDebounceTimer = Timer(const Duration(milliseconds: 500), () {
+      if (!mounted) return;
+      debugPrint('[Phase4] トグル → preference=$newPref (debounced)');
+      _persistRoutePreference();
+      if (_groupDestination != null) {
+        _fetchRoute(_groupDestination!, isRerouting: true, force: true);
+      }
+    });
+  }
+
+  // routePreference を Firebase の destination ノードに部分パス書き込み（他フィールドは保護）
+  Future<void> _persistRoutePreference() async {
+    if (_groupDestination == null) return;
+    await _db
+        .child('rooms/${widget.roomCode}/destination/routePreference')
+        .set(_routePreference);
+  }
+
   // ルート優先度トグル（iOS Settings 風）
-  // 目的地未設定時は非表示。Phase 3 では _routeToggleVisualState だけを切り替え、_routePreference には影響しない。
+  // 目的地未設定時は非表示。タップで _routePreference を切替し 500ms デバウンスで再検索。
   Widget _buildRoutePreferenceToggle() {
     if (_groupDestination == null) return const SizedBox.shrink();
     return Container(
@@ -1965,13 +1990,13 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
         children: [
           _buildToggleSegment(
             label: '🛣 高速優先',
-            isSelected: _routeToggleVisualState,
-            onTap: () => setState(() => _routeToggleVisualState = true),
+            isSelected: _routePreference == 'highway',
+            onTap: () => _onRoutePreferenceToggle('highway'),
           ),
           _buildToggleSegment(
             label: '🚗 下道優先',
-            isSelected: !_routeToggleVisualState,
-            onTap: () => setState(() => _routeToggleVisualState = false),
+            isSelected: _routePreference == 'local',
+            onTap: () => _onRoutePreferenceToggle('local'),
           ),
         ],
       ),
