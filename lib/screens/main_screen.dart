@@ -5,6 +5,7 @@ import 'dart:io';
 import 'dart:ui' as ui;
 
 import 'package:firebase_core/firebase_core.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
@@ -147,6 +148,23 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     Color(0xFF1E88E5), // 青
     Color(0xFF43A047), // 緑
   ];
+
+  // [DEBUG] 位置情報を強制的に上書きする値。null なら GPS の値を使う。
+  // 画面左下のバグアイコンタップでセット、長押しで解除。逸脱再検索バグの調査用。
+  LatLng? _debugLocationOverride;
+
+  // [DEBUG-TEMP] 逸脱判定調査用ログバッファ。最新200行保持。
+  // 後で削除予定（バグ原因特定後）。アプリ内ログ画面で表示。
+  final List<String> _debugLogBuffer = [];
+  static const int _debugLogMaxLines = 200;
+
+  void _appendDebugLog(String msg) {
+    final timestamp = DateTime.now().toIso8601String().substring(11, 19);
+    _debugLogBuffer.add('$timestamp $msg');
+    if (_debugLogBuffer.length > _debugLogMaxLines) {
+      _debugLogBuffer.removeAt(0);
+    }
+  }
 
 
   // AdMob
@@ -1009,6 +1027,13 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
               }
             });
             debugPrint('[Phase5] ルート構築: ${newRoutes.length}本 (選択中=$_selectedRouteIndex, 通過済み着色=有効)');
+            // [DEBUG-TEMP] 再検索完了ログ
+            if (isRerouting) {
+              final selPts = _selectedRouteIndex < newRoutes.length
+                  ? newRoutes[_selectedRouteIndex].points.length
+                  : 0;
+              _appendDebugLog('[再検索完了] routes=${newRoutes.length}本 / 選択中=$_selectedRouteIndex / pts=$selPts');
+            }
             _updatePassedRoute();
             if (!isRerouting) {
               // 前回のタイマーをキャンセル（5秒以内の再設定時の競合防止）
@@ -1397,7 +1422,13 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       locationSettings: _buildLocationSettings(),
     ).listen((pos) async {
       if (!mounted) return;
-      setState(() => _myPosition = LatLng(pos.latitude, pos.longitude));
+      setState(() {
+        _myPosition = LatLng(pos.latitude, pos.longitude);
+        // [DEBUG] オーバーライドが設定されていれば GPS の値を上書き
+        if (kDebugMode && _debugLocationOverride != null) {
+          _myPosition = _debugLocationOverride!;
+        }
+      });
       final spd = pos.speed;
       // 負値（取得不可）は 0 扱い。bearing ガードの外で常に更新
       _currentSpeed = spd > 0 ? spd : 0.0;
@@ -1446,7 +1477,13 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       }
       final pos = await Geolocator.getCurrentPosition();
       if (!mounted) return;
-      setState(() => _myPosition = LatLng(pos.latitude, pos.longitude));
+      setState(() {
+        _myPosition = LatLng(pos.latitude, pos.longitude);
+        // [DEBUG] オーバーライドが設定されていれば GPS の値を上書き
+        if (kDebugMode && _debugLocationOverride != null) {
+          _myPosition = _debugLocationOverride!;
+        }
+      });
       if (_shareLocation) {
         await _db.child('rooms/${widget.roomCode}/members/${widget.userId}').update({
           'nickname': widget.nickname,
@@ -1475,28 +1512,47 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   }
 
   void _checkRouteDeviation() {
-    if (_routePoints.isEmpty || _groupDestination == null) return;
+    if (_routePoints.isEmpty || _groupDestination == null) {
+      final msg = '[逸脱] skip: empty=${_routePoints.isEmpty}, destNull=${_groupDestination == null}';
+      debugPrint(msg);
+      _appendDebugLog(msg);
+      return;
+    }
 
     // 再検索 API 応答待ち中はスキップ（多重発火防止）
-    if (_rerouteInFlight) return;
+    if (_rerouteInFlight) {
+      debugPrint('[逸脱] skip: inFlight');
+      _appendDebugLog('[逸脱] skip: inFlight');
+      return;
+    }
 
     // クールダウン中はスキップ（成功時のみ消費される）
     final now = DateTime.now();
     if (_lastRerouteTime != null &&
         now.difference(_lastRerouteTime!).inSeconds < _rerouteCooldownSecs) {
+      debugPrint('[逸脱] skip: cooldown');
+      _appendDebugLog('[逸脱] skip: cooldown');
       return;
     }
 
     final points = _routePoints;
-    if (points.isEmpty) return;
+    if (points.isEmpty) {
+      debugPrint('[逸脱] skip: points空（getter経由 - 異常）');
+      _appendDebugLog('[逸脱] skip: points空（getter経由 - 異常）');
+      return;
+    }
 
     final dist = _distanceToPolyline(_myPosition, points);
     // 速度連動の動的閾値：50km/h以上は80m（高速並行誤検知抑制）、未満は30m（市街地で機敏に）
     final threshold = _currentSpeed >= _rerouteSpeedThresholdMps
         ? _rerouteThresholdHighSpeedMeters
         : _rerouteThresholdLowSpeedMeters;
+    final detLog = '[逸脱判定] dist=${dist.toStringAsFixed(0)}m / thr=${threshold.toStringAsFixed(0)}m / 速度=${(_currentSpeed * 3.6).toStringAsFixed(1)}km/h / pts=${points.length}';
+    debugPrint(detLog);
+    _appendDebugLog(detLog);
     if (dist > threshold) {
-      debugPrint('ルート逸脱検知: ${dist.toStringAsFixed(0)}m (閾値=${threshold.toStringAsFixed(0)}m, 速度=${(_currentSpeed * 3.6).toStringAsFixed(1)}km/h) → 再検索');
+      debugPrint('[逸脱] 検知 → 再検索');
+      _appendDebugLog('[逸脱] 検知 → 再検索');
       _fetchRoute(_groupDestination!, isRerouting: true);
     }
   }
@@ -1753,6 +1809,12 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
           ],
         ),
         actions: [
+          // [DEBUG-TEMP] 逸脱判定ログ表示ボタン（バグ調査用、後で削除）
+          IconButton(
+            tooltip: '逸脱判定ログ',
+            icon: const Icon(Icons.bug_report, color: Colors.purple),
+            onPressed: _showDebugLogDialog,
+          ),
           // 位置共有スイッチ（GPSラベル付き）
           Row(
             mainAxisSize: MainAxisSize.min,
@@ -2163,7 +2225,82 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
               ),
             ),
           ),
+        // [DEBUG] 逸脱再検索バグ調査用：位置を強制的に100m北にズラす。
+        // タップで _debugLocationOverride をセット → 次回位置更新で _myPosition が上書きされる。
+        // 長押しでクリア。debug ビルドのみ表示。
+        if (kDebugMode)
+          Positioned(
+            left: 12,
+            bottom: 200,
+            child: GestureDetector(
+              onTap: () {
+                setState(() {
+                  _debugLocationOverride = LatLng(
+                    _myPosition.latitude + 0.0009, // 約100m北
+                    _myPosition.longitude,
+                  );
+                  _myPosition = _debugLocationOverride!;
+                });
+                debugPrint('[DEBUG] 位置を100m北にズラした: $_debugLocationOverride');
+                _checkRouteDeviation();
+              },
+              onLongPress: () {
+                setState(() {
+                  _debugLocationOverride = null;
+                });
+                debugPrint('[DEBUG] 位置オーバーライドをクリア');
+              },
+              child: Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.purple.withValues(alpha: 0.85),
+                  borderRadius: BorderRadius.circular(24),
+                  boxShadow: const [BoxShadow(color: Colors.black38, blurRadius: 4)],
+                ),
+                child: const Icon(Icons.bug_report, color: Colors.white, size: 24),
+              ),
+            ),
+          ),
       ],
+    );
+  }
+
+  // [DEBUG-TEMP] 逸脱判定ログ画面（後で削除）
+  void _showDebugLogDialog() {
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('逸脱判定ログ（新しい順）'),
+        content: SizedBox(
+          width: double.maxFinite,
+          height: 400,
+          child: _debugLogBuffer.isEmpty
+              ? const Center(child: Text('（ログ未取得）'))
+              : ListView.builder(
+                  itemCount: _debugLogBuffer.length,
+                  itemBuilder: (c, i) => Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 1),
+                    child: Text(
+                      _debugLogBuffer[_debugLogBuffer.length - 1 - i],
+                      style: const TextStyle(fontSize: 11, fontFamily: 'monospace'),
+                    ),
+                  ),
+                ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              setState(() => _debugLogBuffer.clear());
+              Navigator.pop(ctx);
+            },
+            child: const Text('クリア'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('閉じる'),
+          ),
+        ],
+      ),
     );
   }
 
