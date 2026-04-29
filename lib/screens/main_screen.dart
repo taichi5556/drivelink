@@ -119,8 +119,13 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   Timer? _routeOverviewTimer;
   bool _inRouteOverview = false;
 
-  // 通過済みルート
-  List<LatLng> _routePoints = [];
+  // 取得した全ルート（最大3本、Directions API alternatives=true で取得）
+  List<_Route> _routes = [];
+  // 選択中のルートインデックス（描画では太線オレンジで表示）
+  int _selectedRouteIndex = 0;
+  // 互換 getter（既存の _routePoints 参照を維持。選択中ルートの座標列を返す）
+  List<LatLng> get _routePoints =>
+      _routes.isEmpty ? const [] : _routes[_selectedRouteIndex].points;
 
   // 車両マーカーキャッシュ（vehicleType-isMe → BitmapDescriptor）
   final Map<String, BitmapDescriptor> _markerCache = {};
@@ -903,7 +908,8 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       _routeOverviewTimer?.cancel();
       setState(() {
         _polylines = {};
-        _routePoints = [];
+        _routes = [];
+        _selectedRouteIndex = 0;
         _headingUp = false;
       });
       _animateCameraWithBearing(_myPosition, 0);
@@ -933,39 +939,49 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
         final data = jsonDecode(body);
         final status = data['status'] as String?;
         if (status == 'OK') {
-          final routes = data['routes'] as List;
-          debugPrint('[Phase1] ルート取得: ${routes.length}本 (preference=$_routePreference)');
-          for (int i = 0; i < routes.length; i++) {
-            final leg = routes[i]['legs'][0];
-            final summary = routes[i]['summary'];
-            final duration = leg['duration']['text'];
-            final distance = leg['distance']['text'];
+          final routesJson = data['routes'] as List;
+          debugPrint('[Phase1] ルート取得: ${routesJson.length}本 (preference=$_routePreference)');
+          final newRoutes = <_Route>[];
+          for (int i = 0; i < routesJson.length; i++) {
+            final leg = routesJson[i]['legs'][0];
+            final summary = (routesJson[i]['summary'] as String?) ?? '';
+            final duration = (leg['duration']['text'] as String?) ?? '';
+            final distance = (leg['distance']['text'] as String?) ?? '';
             debugPrint('[Phase1]   [$i] summary="$summary" / $duration / $distance');
+            final steps = leg['steps'] as List;
+            final coords = <LatLng>[];
+            for (final step in steps) {
+              final encoded = step['polyline']['points'] as String;
+              final pts = PolylinePoints.decodePolyline(encoded);
+              coords.addAll(pts.map((p) => LatLng(p.latitude, p.longitude)));
+            }
+            if (coords.isNotEmpty) {
+              newRoutes.add(_Route(
+                points: coords,
+                summary: summary,
+                durationText: duration,
+                distanceText: distance,
+              ));
+            }
           }
-          final steps = data['routes'][0]['legs'][0]['steps'] as List;
-          final allCoords = <LatLng>[];
-          for (final step in steps) {
-            final encoded = step['polyline']['points'] as String;
-            final points = PolylinePoints.decodePolyline(encoded);
-            allCoords.addAll(points.map((p) => LatLng(p.latitude, p.longitude)));
-          }
-          if (allCoords.isNotEmpty && mounted) {
-            _routePoints = allCoords;
+          if (newRoutes.isNotEmpty && mounted) {
             setState(() {
+              _routes = newRoutes;
+              // コース逸脱再検索後の選択ルート維持。範囲外なら 0 にフォールバック
+              if (isRerouting) {
+                if (_selectedRouteIndex >= newRoutes.length) {
+                  _selectedRouteIndex = 0;
+                }
+              } else {
+                _selectedRouteIndex = 0;
+              }
               // 再検索時はヘディングアップ・追跡状態を変更しない
               if (!isRerouting) {
                 _headingUp = true;
                 _isFollowingMember = false;
               }
-              _polylines = {
-                Polyline(
-                  polylineId: const PolylineId('route'),
-                  points: allCoords,
-                  color: const Color(0xFFFF6B35),
-                  width: 5,
-                ),
-              };
             });
+            debugPrint('[Phase5] ルート構築: ${newRoutes.length}本 (選択中=$_selectedRouteIndex, 通過済み着色=有効)');
             _updatePassedRoute();
             if (!isRerouting) {
               // 前回のタイマーをキャンセル（5秒以内の再設定時の競合防止）
@@ -1504,37 +1520,69 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     );
   }
 
+  // 走行中の通過済み着色更新。実体は _rebuildPolylines() に移譲。
   void _updatePassedRoute() {
-    if (_routePoints.isEmpty || !mounted) return;
-    // 現在地から最も近いルート点のインデックスを検索
+    _rebuildPolylines();
+  }
+
+  // 全ルートを zIndex 付きで描画。選択中ルートのみ通過済み（灰色）/ 残り（オレンジ）に分割。
+  // 代替ルートは灰色 alpha 0.5 で背面描画、選択中残りは最前面（zIndex 3）。
+  void _rebuildPolylines() {
+    if (!mounted || _routes.isEmpty) return;
+    if (_selectedRouteIndex < 0 || _selectedRouteIndex >= _routes.length) return;
+    final selectedPoints = _routes[_selectedRouteIndex].points;
+    if (selectedPoints.isEmpty) return;
+
+    // 選択中ルートの通過済み判定（現在地から最も近い点のインデックス）
     int closestIdx = 0;
     double minDist = double.infinity;
-    for (int i = 0; i < _routePoints.length; i++) {
-      final d = _metersTo(_myPosition, _routePoints[i]);
+    for (int i = 0; i < selectedPoints.length; i++) {
+      final d = _metersTo(_myPosition, selectedPoints[i]);
       if (d < minDist) {
         minDist = d;
         closestIdx = i;
       }
     }
-    final passed = _routePoints.sublist(0, closestIdx + 1);
-    final remaining = _routePoints.sublist(closestIdx);
+    final passed = selectedPoints.sublist(0, closestIdx + 1);
+    final remaining = selectedPoints.sublist(closestIdx);
+
     final newPolylines = <Polyline>{};
+
+    // 1) 代替ルート（背面、zIndex 1）
+    // 色: 選択中 (#FF6B35) と同系統の薄いオレンジで「ルートと識別できる」&「選択中と区別できる」を両立
+    for (int i = 0; i < _routes.length; i++) {
+      if (i == _selectedRouteIndex) continue;
+      newPolylines.add(Polyline(
+        polylineId: PolylineId('route_$i'),
+        points: _routes[i].points,
+        color: const Color(0xFFFFB89A),
+        width: 5,
+        zIndex: 1,
+      ));
+    }
+
+    // 2) 選択中ルートの通過済み（中間、zIndex 2）
     if (passed.length >= 2) {
       newPolylines.add(Polyline(
-        polylineId: const PolylineId('route_passed'),
+        polylineId: PolylineId('route_${_selectedRouteIndex}_passed'),
         points: passed,
         color: Colors.grey.withValues(alpha: 0.35),
         width: 5,
+        zIndex: 2,
       ));
     }
+
+    // 3) 選択中ルートの残り（最前面、zIndex 3）
     if (remaining.length >= 2) {
       newPolylines.add(Polyline(
-        polylineId: const PolylineId('route'),
+        polylineId: PolylineId('route_${_selectedRouteIndex}_remaining'),
         points: remaining,
         color: const Color(0xFFFF6B35),
-        width: 5,
+        width: 6,
+        zIndex: 3,
       ));
     }
+
     setState(() => _polylines = newPolylines);
   }
 
@@ -2103,7 +2151,8 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                           _groupDestination = null;
                           _groupDestName = '';
                           _polylines = {};
-                          _routePoints = [];
+                          _routes = [];
+                          _selectedRouteIndex = 0;
                           _headingUp = false;
                         });
                         _animateCameraWithBearing(_myPosition, 0);
@@ -2325,4 +2374,18 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     if (bearing < 112.5) return '東';
     return '南東';
   }
+}
+
+// Directions API から取得した 1 本のルート情報。複数ルート (alternatives=true) の保持に使用。
+class _Route {
+  final List<LatLng> points;
+  final String summary;
+  final String durationText;
+  final String distanceText;
+  const _Route({
+    required this.points,
+    required this.summary,
+    required this.durationText,
+    required this.distanceText,
+  });
 }
