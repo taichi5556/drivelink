@@ -407,9 +407,17 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
         setState(() {
           _groupDestination = null;
           _groupDestName = '';
+          _routePreference = 'highway';
         });
         _updateDestinationMarker();
         return;
+      }
+      // routePreference は senderUid に関係なく全メンバーで同期する（自分が共有した値も Firebase 経由の変更を拾う）
+      final rawPref = data['routePreference'] as String?;
+      final validPref = (rawPref == 'highway' || rawPref == 'local') ? rawPref! : 'highway';
+      if (_routePreference != validPref) {
+        setState(() => _routePreference = validPref);
+        debugPrint('[Phase2] routePreference 更新: $validPref');
       }
       final lat = (data['lat'] as num?)?.toDouble();
       final lng = (data['lng'] as num?)?.toDouble();
@@ -1240,6 +1248,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       'senderUid': widget.userId,
       'senderNick': widget.nickname,
       'shared_at': DateTime.now().millisecondsSinceEpoch,
+      'routePreference': _routePreference,
     });
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
