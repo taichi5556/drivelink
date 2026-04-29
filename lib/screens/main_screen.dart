@@ -2094,26 +2094,22 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   }
 
   // ナビ開始処理（共通ヘルパー）。
-  // プレビュー中フラグの解除、ヘディングアップ ON、追跡解除、5秒後に概観 → 通常ズームの復帰タイマーをセット。
+  // プレビュー中フラグの解除、ヘディングアップ ON、追跡解除、即座に現在地ズームへ移動。
   // 「このルートで出発」と「ルート共有（プレビュー中の直接共有）」の両方から呼ぶ。
   void _startNavigation() {
     setState(() {
       _isRoutePreview = false;
       _headingUp = true;
       _isFollowingMember = false;
-    });
-    _routeOverviewTimer?.cancel();
-    _routeOverviewTimer = Timer(const Duration(seconds: 5), () {
-      if (!mounted || _routePoints.isEmpty) return;
       _inRouteOverview = false;
       _currentZoom = 17.0;
-      if (_isFollowingMember) return;
-      if (_headingUp) {
-        _moveCameraWithBearing(_myPosition, _currentBearing);
-      } else {
-        _animateCamera(CameraUpdate.newLatLngZoom(_myPosition, 17.0), programmatic: true);
-      }
     });
+    _routeOverviewTimer?.cancel();
+    if (_headingUp) {
+      _moveCameraWithBearing(_myPosition, _currentBearing);
+    } else {
+      _animateCamera(CameraUpdate.newLatLngZoom(_myPosition, 17.0), programmatic: true);
+    }
   }
 
   // 「このルートで出発」: 自分のルートを確定してナビ開始。Firebase は触らない。
