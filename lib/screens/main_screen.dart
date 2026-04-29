@@ -68,6 +68,23 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   LatLng? get _activeDestination => _groupDestination;
   String get _activeDestName => _groupDestName;
 
+  // ルート優先度（'highway' = 高速優先 / 'local' = 下道優先）
+  // Firebase destination ノードと双方向同期。トグル UI のソースオブトゥルース。
+  String _routePreference = 'highway';
+
+  // トグル切替時のデバウンス用タイマー（500ms 後に Firebase 書き込み + 再検索）
+  Timer? _routePreferenceDebounceTimer;
+
+  // 目的地候補をタップしてルート描画した直後の「プレビュー中」フラグ。
+  // true の間は「このルートで出発」「やめる」フローティングを表示し、
+  // ナビ開始系の処理（ヘディングアップ自動 ON、5秒後の現在地ズーム復帰）をスキップする。
+  bool _isRoutePreview = false;
+
+  // 目的地が Firebase に共有済みかどうか。
+  // 自分が「ルート共有」ボタンを押した時、または他メンバーから受信した時に true。
+  // トグル切替時の Firebase 書き込み判定に使う（true のときだけ書き込む）。
+  bool _isShared = false;
+
   // ルート逸脱自動再検索
   DateTime? _lastRerouteTime;     // API 成功時刻（クールダウン基準）
   bool _rerouteInFlight = false;  // 再検索 API 応答待ちガード（多重発火防止）
@@ -112,11 +129,43 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   Timer? _routeOverviewTimer;
   bool _inRouteOverview = false;
 
-  // 通過済みルート
-  List<LatLng> _routePoints = [];
+  // 取得した全ルート（最大3本、Directions API alternatives=true で取得）
+  List<_Route> _routes = [];
+  // 選択中のルートインデックス（描画では太線オレンジで表示）
+  int _selectedRouteIndex = 0;
+  // 互換 getter（既存の _routePoints 参照を維持。選択中ルートの座標列を返す）
+  List<LatLng> get _routePoints =>
+      _routes.isEmpty ? const [] : _routes[_selectedRouteIndex].points;
 
   // 車両マーカーキャッシュ（vehicleType-isMe → BitmapDescriptor）
   final Map<String, BitmapDescriptor> _markerCache = {};
+
+  // プレビュー中のルート色（最大3本対応）。0=赤, 1=青, 2=緑。
+  // インデックスがこの長さを超えた場合はモジュロで巡回。
+  static const _previewRouteColors = [
+    Color(0xFFE53935), // 赤
+    Color(0xFF1E88E5), // 青
+    Color(0xFF43A047), // 緑
+  ];
+
+  // 逸脱判定調査用ログバッファ。最新200行保持。アプリ内ログ画面で表示。
+  // 公開版にも入れて常時収集（メモリ消費は微小）。表示のオン/オフは _debugLogEnabled で制御。
+  final List<String> _debugLogBuffer = [];
+  static const int _debugLogMaxLines = 200;
+
+  // 隠しデバッグメニュー（TouriLink ロゴ10回タップで解禁/無効）。
+  // バグアイコン・位置オーバーライドボタン等の表示制御。
+  bool _debugLogEnabled = false;
+  int _debugTapCount = 0;
+  DateTime? _lastDebugTapTime;
+
+  void _appendDebugLog(String msg) {
+    final timestamp = DateTime.now().toIso8601String().substring(11, 19);
+    _debugLogBuffer.add('$timestamp $msg');
+    if (_debugLogBuffer.length > _debugLogMaxLines) {
+      _debugLogBuffer.removeAt(0);
+    }
+  }
 
 
   // AdMob
@@ -403,9 +452,19 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
         setState(() {
           _groupDestination = null;
           _groupDestName = '';
+          _routePreference = 'highway';
+          _isRoutePreview = false;
+          _isShared = false;
         });
         _updateDestinationMarker();
         return;
+      }
+      // routePreference は senderUid に関係なく全メンバーで同期する（自分が共有した値も Firebase 経由の変更を拾う）
+      final rawPref = data['routePreference'] as String?;
+      final validPref = (rawPref == 'highway' || rawPref == 'local') ? rawPref! : 'highway';
+      if (_routePreference != validPref) {
+        setState(() => _routePreference = validPref);
+        debugPrint('[Phase2] routePreference 更新: $validPref');
       }
       final lat = (data['lat'] as num?)?.toDouble();
       final lng = (data['lng'] as num?)?.toDouble();
@@ -414,9 +473,13 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       if (lat == null || lng == null) return;
       final newDest = LatLng(lat, lng);
       if (senderUid != widget.userId) {
+        // 他メンバーが共有した目的地を受信したらプレビューを強制解除し、
+        // Firebase 同期済み状態に遷移（_isShared=true）
         setState(() {
           _groupDestination = newDest;
           _groupDestName = name;
+          _isRoutePreview = false;
+          _isShared = true;
         });
         _updateDestinationMarker();
         _saveDestHistory(name, lat, lng);
@@ -874,7 +937,9 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       ));
     });
 
-    setState(() => _markers = newMarkers);
+    if (mounted) {
+      setState(() => _markers = newMarkers);
+    }
   }
 
   // ── ここまで警告ポイント ───────────────────────────────────────
@@ -888,7 +953,8 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       _routeOverviewTimer?.cancel();
       setState(() {
         _polylines = {};
-        _routePoints = [];
+        _routes = [];
+        _selectedRouteIndex = 0;
         _headingUp = false;
       });
       _animateCameraWithBearing(_myPosition, 0);
@@ -896,8 +962,8 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     _rebuildMarkers();
   }
 
-  Future<bool> _fetchRoute(LatLng dest, {bool isRerouting = false}) async {
-    if (isRerouting && _rerouteInFlight) return false;
+  Future<bool> _fetchRoute(LatLng dest, {bool isRerouting = false, bool force = false}) async {
+    if (isRerouting && !force && _rerouteInFlight) return false;
     if (isRerouting) _rerouteInFlight = true;
 
     const apiKey = 'AIzaSyChuUZypiVhojgCO6ZgZML-ZW3eYLtti5c';
@@ -906,9 +972,10 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     try {
       final origin = '${_myPosition.latitude},${_myPosition.longitude}';
       final destination = '${dest.latitude},${dest.longitude}';
+      final avoidParam = _routePreference == 'local' ? '&avoid=highways' : '';
       final url = 'https://maps.googleapis.com/maps/api/directions/json'
           '?origin=$origin&destination=$destination'
-          '&mode=driving&language=ja&key=$apiKey';
+          '&mode=driving&language=ja&alternatives=true$avoidParam&key=$apiKey';
       final client = HttpClient();
       try {
         final request = await client.getUrl(Uri.parse(url));
@@ -917,30 +984,57 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
         final data = jsonDecode(body);
         final status = data['status'] as String?;
         if (status == 'OK') {
-          final steps = data['routes'][0]['legs'][0]['steps'] as List;
-          final allCoords = <LatLng>[];
-          for (final step in steps) {
-            final encoded = step['polyline']['points'] as String;
-            final points = PolylinePoints.decodePolyline(encoded);
-            allCoords.addAll(points.map((p) => LatLng(p.latitude, p.longitude)));
+          final routesJson = data['routes'] as List;
+          debugPrint('[Phase1] ルート取得: ${routesJson.length}本 (preference=$_routePreference)');
+          final newRoutes = <_Route>[];
+          for (int i = 0; i < routesJson.length; i++) {
+            final leg = routesJson[i]['legs'][0];
+            final summary = (routesJson[i]['summary'] as String?) ?? '';
+            final duration = (leg['duration']['text'] as String?) ?? '';
+            final distance = (leg['distance']['text'] as String?) ?? '';
+            debugPrint('[Phase1]   [$i] summary="$summary" / $duration / $distance');
+            final steps = leg['steps'] as List;
+            final coords = <LatLng>[];
+            for (final step in steps) {
+              final encoded = step['polyline']['points'] as String;
+              final pts = PolylinePoints.decodePolyline(encoded);
+              coords.addAll(pts.map((p) => LatLng(p.latitude, p.longitude)));
+            }
+            if (coords.isNotEmpty) {
+              newRoutes.add(_Route(
+                points: coords,
+                summary: summary,
+                durationText: duration,
+                distanceText: distance,
+              ));
+            }
           }
-          if (allCoords.isNotEmpty && mounted) {
-            _routePoints = allCoords;
+          if (newRoutes.isNotEmpty && mounted) {
             setState(() {
-              // 再検索時はヘディングアップ・追跡状態を変更しない
-              if (!isRerouting) {
+              _routes = newRoutes;
+              // コース逸脱再検索後の選択ルート維持。範囲外なら 0 にフォールバック
+              if (isRerouting) {
+                if (_selectedRouteIndex >= newRoutes.length) {
+                  _selectedRouteIndex = 0;
+                }
+              } else {
+                _selectedRouteIndex = 0;
+              }
+              // 再検索時 / プレビュー中はヘディングアップ・追跡状態を変更しない
+              // （プレビュー中はナビ開始扱いにせず、ユーザーが「このルートで出発」を押すまで保留）
+              if (!isRerouting && !_isRoutePreview) {
                 _headingUp = true;
                 _isFollowingMember = false;
               }
-              _polylines = {
-                Polyline(
-                  polylineId: const PolylineId('route'),
-                  points: allCoords,
-                  color: const Color(0xFFFF6B35),
-                  width: 5,
-                ),
-              };
             });
+            debugPrint('[Phase5] ルート構築: ${newRoutes.length}本 (選択中=$_selectedRouteIndex, 通過済み着色=有効)');
+            // [DEBUG-TEMP] 再検索完了ログ
+            if (isRerouting) {
+              final selPts = _selectedRouteIndex < newRoutes.length
+                  ? newRoutes[_selectedRouteIndex].points.length
+                  : 0;
+              _appendDebugLog('[再検索完了] routes=${newRoutes.length}本 / 選択中=$_selectedRouteIndex / pts=$selPts');
+            }
             _updatePassedRoute();
             if (!isRerouting) {
               // 前回のタイマーをキャンセル（5秒以内の再設定時の競合防止）
@@ -964,19 +1058,22 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                 );
                 _inRouteOverview = true;
                 _animateCamera(CameraUpdate.newLatLngBounds(bounds, 80), programmatic: true);
-                // 5秒後に通常ズームへ自動復帰
-                _routeOverviewTimer = Timer(const Duration(seconds: 5), () {
-                  if (!mounted || _routePoints.isEmpty) return;
-                  _inRouteOverview = false;
-                  _currentZoom = 17.0;
-                  // ユーザーが地図操作中（追従停止中）なら強制復帰しない
-                  if (_isFollowingMember) return;
-                  if (_headingUp) {
-                    _moveCameraWithBearing(_myPosition, _currentBearing);
-                  } else {
-                    _animateCamera(CameraUpdate.newLatLngZoom(_myPosition, 17.0), programmatic: true);
-                  }
-                });
+                // 5秒後に通常ズームへ自動復帰（プレビュー中はセットしない＝ユーザーが
+                // 「このルートで出発」を押した時に _startNavigation がセットする）
+                if (!_isRoutePreview) {
+                  _routeOverviewTimer = Timer(const Duration(seconds: 5), () {
+                    if (!mounted || _routePoints.isEmpty) return;
+                    _inRouteOverview = false;
+                    _currentZoom = 17.0;
+                    // ユーザーが地図操作中（追従停止中）なら強制復帰しない
+                    if (_isFollowingMember) return;
+                    if (_headingUp) {
+                      _moveCameraWithBearing(_myPosition, _currentBearing);
+                    } else {
+                      _animateCamera(CameraUpdate.newLatLngZoom(_myPosition, 17.0), programmatic: true);
+                    }
+                  });
+                }
               }
             }
             succeeded = true;
@@ -1066,6 +1163,10 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       setState(() {
         _groupDestination = LatLng(lat, lng);
         _groupDestName = name;
+        _isRoutePreview = true;
+        // 新規目的地検索時は「高速優先」にリセット。
+        // 前回「下道優先」のまま検索すると意図せず狭い道が選ばれることがあるため。
+        _routePreference = 'highway';
       });
       _updateDestinationMarker();
       _saveDestHistory(name, lat, lng);
@@ -1182,6 +1283,8 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                     setState(() {
                       _groupDestination = _myPosition;
                       _groupDestName = '現在地';
+                      _isRoutePreview = true;
+                      _routePreference = 'highway';
                     });
                     _updateDestinationMarker();
                     Navigator.pop(ctx);
@@ -1194,7 +1297,12 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
             if (_groupDestination != null)
               TextButton(
                 onPressed: () {
-                  setState(() { _groupDestination = null; _groupDestName = ''; });
+                  setState(() {
+                    _groupDestination = null;
+                    _groupDestName = '';
+                    _isRoutePreview = false;
+                    _isShared = false;
+                  });
                   _updateDestinationMarker();
                   Navigator.pop(ctx);
                 },
@@ -1217,6 +1325,11 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       );
       return;
     }
+    // プレビュー中に直接「ルート共有」を押した場合はナビも同時に開始する
+    // （ローカル確定済みの場合は _isRoutePreview=false なので何もしない）
+    if (_isRoutePreview) {
+      _startNavigation();
+    }
     final dest = _activeDestination!;
     final name = _activeDestName;
     await _db.child('rooms/${widget.roomCode}/destination').set({
@@ -1226,8 +1339,10 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       'senderUid': widget.userId,
       'senderNick': widget.nickname,
       'shared_at': DateTime.now().millisecondsSinceEpoch,
+      'routePreference': _routePreference,
     });
     if (mounted) {
+      setState(() => _isShared = true);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('📍 「$name」をグループに共有しました'), backgroundColor: const Color(0xFF1A3A5C)),
       );
@@ -1386,28 +1501,47 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   }
 
   void _checkRouteDeviation() {
-    if (_routePoints.isEmpty || _groupDestination == null) return;
+    if (_routePoints.isEmpty || _groupDestination == null) {
+      final msg = '[逸脱] skip: empty=${_routePoints.isEmpty}, destNull=${_groupDestination == null}';
+      debugPrint(msg);
+      _appendDebugLog(msg);
+      return;
+    }
 
     // 再検索 API 応答待ち中はスキップ（多重発火防止）
-    if (_rerouteInFlight) return;
+    if (_rerouteInFlight) {
+      debugPrint('[逸脱] skip: inFlight');
+      _appendDebugLog('[逸脱] skip: inFlight');
+      return;
+    }
 
     // クールダウン中はスキップ（成功時のみ消費される）
     final now = DateTime.now();
     if (_lastRerouteTime != null &&
         now.difference(_lastRerouteTime!).inSeconds < _rerouteCooldownSecs) {
+      debugPrint('[逸脱] skip: cooldown');
+      _appendDebugLog('[逸脱] skip: cooldown');
       return;
     }
 
     final points = _routePoints;
-    if (points.isEmpty) return;
+    if (points.isEmpty) {
+      debugPrint('[逸脱] skip: points空（getter経由 - 異常）');
+      _appendDebugLog('[逸脱] skip: points空（getter経由 - 異常）');
+      return;
+    }
 
     final dist = _distanceToPolyline(_myPosition, points);
     // 速度連動の動的閾値：50km/h以上は80m（高速並行誤検知抑制）、未満は30m（市街地で機敏に）
     final threshold = _currentSpeed >= _rerouteSpeedThresholdMps
         ? _rerouteThresholdHighSpeedMeters
         : _rerouteThresholdLowSpeedMeters;
+    final detLog = '[逸脱判定] dist=${dist.toStringAsFixed(0)}m / thr=${threshold.toStringAsFixed(0)}m / 速度=${(_currentSpeed * 3.6).toStringAsFixed(1)}km/h / pts=${points.length}';
+    debugPrint(detLog);
+    _appendDebugLog(detLog);
     if (dist > threshold) {
-      debugPrint('ルート逸脱検知: ${dist.toStringAsFixed(0)}m (閾値=${threshold.toStringAsFixed(0)}m, 速度=${(_currentSpeed * 3.6).toStringAsFixed(1)}km/h) → 再検索');
+      debugPrint('[逸脱] 検知 → 再検索');
+      _appendDebugLog('[逸脱] 検知 → 再検索');
       _fetchRoute(_groupDestination!, isRerouting: true);
     }
   }
@@ -1478,37 +1612,73 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     );
   }
 
+  // 走行中の通過済み着色更新。実体は _rebuildPolylines() に移譲。
   void _updatePassedRoute() {
-    if (_routePoints.isEmpty || !mounted) return;
-    // 現在地から最も近いルート点のインデックスを検索
-    int closestIdx = 0;
-    double minDist = double.infinity;
-    for (int i = 0; i < _routePoints.length; i++) {
-      final d = _metersTo(_myPosition, _routePoints[i]);
-      if (d < minDist) {
-        minDist = d;
-        closestIdx = i;
+    _rebuildPolylines();
+  }
+
+  // ルートポリラインを再構築。プレビュー中とナビ中で表示が大きく変わる。
+  // - プレビュー中: 全ルートを 3 色（赤/青/緑）で描画。選択中は太線。
+  // - ナビ中: 選択中ルートのみオレンジで描画（通過済みは灰色）。代替ルートは非表示。
+  void _rebuildPolylines() {
+    if (!mounted || _routes.isEmpty) return;
+    if (_selectedRouteIndex < 0 || _selectedRouteIndex >= _routes.length) return;
+    final selectedPoints = _routes[_selectedRouteIndex].points;
+    if (selectedPoints.isEmpty) return;
+
+    final newPolylines = <Polyline>{};
+
+    if (_isRoutePreview) {
+      // プレビュー中: 全ルートを 3 色で描画。選択中を太線＋前面、代替を細線＋背面。
+      for (int i = 0; i < _routes.length; i++) {
+        final pts = _routes[i].points;
+        if (pts.length < 2) continue;
+        final isSelected = i == _selectedRouteIndex;
+        final color = _previewRouteColors[i % _previewRouteColors.length];
+        newPolylines.add(Polyline(
+          polylineId: PolylineId('route_$i'),
+          points: pts,
+          color: color,
+          width: isSelected ? 8 : 5,
+          zIndex: isSelected ? 3 : 1,
+        ));
+      }
+    } else {
+      // ナビ中: 選択中ルートの通過済み判定（現在地から最も近い点のインデックス）
+      int closestIdx = 0;
+      double minDist = double.infinity;
+      for (int i = 0; i < selectedPoints.length; i++) {
+        final d = _metersTo(_myPosition, selectedPoints[i]);
+        if (d < minDist) {
+          minDist = d;
+          closestIdx = i;
+        }
+      }
+      final passed = selectedPoints.sublist(0, closestIdx + 1);
+      final remaining = selectedPoints.sublist(closestIdx);
+
+      // 通過済み（灰色、中間）
+      if (passed.length >= 2) {
+        newPolylines.add(Polyline(
+          polylineId: PolylineId('route_${_selectedRouteIndex}_passed'),
+          points: passed,
+          color: Colors.grey.withValues(alpha: 0.35),
+          width: 5,
+          zIndex: 2,
+        ));
+      }
+      // 残り（オレンジ、最前面）
+      if (remaining.length >= 2) {
+        newPolylines.add(Polyline(
+          polylineId: PolylineId('route_${_selectedRouteIndex}_remaining'),
+          points: remaining,
+          color: const Color(0xFFFF6B35),
+          width: 6,
+          zIndex: 3,
+        ));
       }
     }
-    final passed = _routePoints.sublist(0, closestIdx + 1);
-    final remaining = _routePoints.sublist(closestIdx);
-    final newPolylines = <Polyline>{};
-    if (passed.length >= 2) {
-      newPolylines.add(Polyline(
-        polylineId: const PolylineId('route_passed'),
-        points: passed,
-        color: Colors.grey.withValues(alpha: 0.35),
-        width: 5,
-      ));
-    }
-    if (remaining.length >= 2) {
-      newPolylines.add(Polyline(
-        polylineId: const PolylineId('route'),
-        points: remaining,
-        color: const Color(0xFFFF6B35),
-        width: 5,
-      ));
-    }
+
     setState(() => _polylines = newPolylines);
   }
 
@@ -1522,6 +1692,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     _warningCleanupTimer?.cancel();
     _connectionRefreshTimer?.cancel();
     _routeOverviewTimer?.cancel();
+    _routePreferenceDebounceTimer?.cancel();
     _membersSubscription?.cancel();
     _destSubscription?.cancel();
     _warningsSubscription?.cancel();
@@ -1620,13 +1791,25 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('TouriLink',
-                style: GoogleFonts.audiowide(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
+            // TouriLink ロゴ：10回連打で隠しデバッグメニュー解禁/無効を切替
+            GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: _onLogoTapped,
+              child: Text('TouriLink',
+                  style: GoogleFonts.audiowide(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
+            ),
             Text('ルーム: ${widget.roomCode} | ${_members.length}人が走行中',
                 style: const TextStyle(color: Colors.grey, fontSize: 12)),
           ],
         ),
         actions: [
+          // 隠しデバッグメニュー（TouriLink ロゴ10回タップで解禁時のみ表示）
+          if (_debugLogEnabled)
+            IconButton(
+              tooltip: '逸脱判定ログ',
+              icon: const Icon(Icons.bug_report, color: Colors.purple),
+              onPressed: _showDebugLogDialog,
+            ),
           // 位置共有スイッチ（GPSラベル付き）
           Row(
             mainAxisSize: MainAxisSize.min,
@@ -1686,6 +1869,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
         child: Column(
           children: [
             if (_remainingTime.isNotEmpty) _buildTimerBanner(),
+            _buildRoutePreferenceToggle(),
             Expanded(child: _buildMap()),
             _buildBottomSection(),
             if (_isBannerAdLoaded) _buildAdBanner(),
@@ -1708,6 +1892,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
               child: Column(
                 children: [
                   if (_remainingTime.isNotEmpty) _buildTimerBanner(),
+                  _buildRoutePreferenceToggle(),
                   Expanded(child: _buildMap()),
                 ],
               ),
@@ -1819,6 +2004,8 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
             setState(() {
               _groupDestination = latLng;
               _groupDestName = name;
+              _isRoutePreview = true;
+              _routePreference = 'highway';
             });
             _updateDestinationMarker();
             _saveDestHistory(name, latLng.latitude, latLng.longitude);
@@ -1917,7 +2104,333 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
             ),
           ),
         ),
+        // プレビュー中のみ表示するフローティングアクション。
+        // 「このルートで出発」= Firebase 共有でグループに確定 / 「やめる」= ローカル破棄して再検索ダイアログ
+        if (_isRoutePreview && _groupDestination != null)
+          Positioned(
+            left: 0,
+            right: 0,
+            bottom: 90,
+            child: Center(
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  GestureDetector(
+                    onTap: _confirmRouteAndStartNav,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFFF6B35),
+                        borderRadius: BorderRadius.circular(24),
+                        boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 4)],
+                      ),
+                      child: const Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.navigation, color: Colors.white, size: 20),
+                          SizedBox(width: 8),
+                          Text(
+                            'このルートで出発',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 14,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  GestureDetector(
+                    onTap: _cancelRoutePreview,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF1A3A5C).withValues(alpha: 0.95),
+                        borderRadius: BorderRadius.circular(24),
+                        boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 4)],
+                      ),
+                      child: const Text(
+                        'やめる',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        // プレビュー中: 画面右端に縦並びでルート選択吹き出しを表示。
+        // 各吹き出しの色は対応するルート色（赤/青/緑）と一致させる。
+        // 選択中は白い太枠線で強調。タップで _selectRoute(i)。
+        if (_isRoutePreview && _routes.isNotEmpty)
+          Positioned(
+            right: 12,
+            top: 0,
+            bottom: 0,
+            child: Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  for (int i = 0; i < _routes.length; i++)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 4),
+                      child: GestureDetector(
+                        onTap: () => _selectRoute(i),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                          decoration: BoxDecoration(
+                            color: _previewRouteColors[i % _previewRouteColors.length],
+                            borderRadius: BorderRadius.circular(14),
+                            border: i == _selectedRouteIndex
+                                ? Border.all(color: Colors.white, width: 3)
+                                : null,
+                            boxShadow: const [BoxShadow(color: Colors.black38, blurRadius: 6)],
+                          ),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            crossAxisAlignment: CrossAxisAlignment.end,
+                            children: [
+                              Text(
+                                _routes[i].durationText,
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 18,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                              Text(
+                                _routes[i].distanceText,
+                                style: const TextStyle(
+                                  color: Colors.white70,
+                                  fontSize: 13,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
       ],
+    );
+  }
+
+  // TouriLink ロゴ10回連打で隠しデバッグメニューの有効/無効を切替。
+  // 直近2秒以内の連続タップのみカウントし、それ以外でリセット。
+  void _onLogoTapped() {
+    final now = DateTime.now();
+    if (_lastDebugTapTime != null &&
+        now.difference(_lastDebugTapTime!).inSeconds > 2) {
+      _debugTapCount = 0;
+    }
+    _debugTapCount++;
+    _lastDebugTapTime = now;
+
+    if (_debugTapCount >= 10) {
+      setState(() {
+        _debugLogEnabled = !_debugLogEnabled;
+        _debugTapCount = 0;
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(_debugLogEnabled ? '🐛 デバッグメニュー有効' : 'デバッグメニュー無効'),
+            duration: const Duration(seconds: 1),
+            backgroundColor: const Color(0xFF1A3A5C),
+          ),
+        );
+      }
+    }
+  }
+
+  // 逸脱判定ログ画面（隠しデバッグメニュー）
+  void _showDebugLogDialog() {
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('逸脱判定ログ（新しい順）'),
+        content: SizedBox(
+          width: double.maxFinite,
+          height: 400,
+          child: _debugLogBuffer.isEmpty
+              ? const Center(child: Text('（ログ未取得）'))
+              : ListView.builder(
+                  itemCount: _debugLogBuffer.length,
+                  itemBuilder: (c, i) => Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 1),
+                    child: Text(
+                      _debugLogBuffer[_debugLogBuffer.length - 1 - i],
+                      style: const TextStyle(fontSize: 11, fontFamily: 'monospace'),
+                    ),
+                  ),
+                ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              setState(() => _debugLogBuffer.clear());
+              Navigator.pop(ctx);
+            },
+            child: const Text('クリア'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('閉じる'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // 吹き出しタップで選択中ルートを切替。polyline のみ再構築（吹き出しは Widget なので setState で自動更新）。
+  void _selectRoute(int index) {
+    if (index < 0 || index >= _routes.length) return;
+    if (index == _selectedRouteIndex) return;
+    setState(() => _selectedRouteIndex = index);
+    _rebuildPolylines();
+  }
+
+  // ナビ開始処理（共通ヘルパー）。
+  // プレビュー中フラグの解除、ヘディングアップ ON、追跡解除、即座に現在地ズームへ移動。
+  // 「このルートで出発」と「ルート共有（プレビュー中の直接共有）」の両方から呼ぶ。
+  void _startNavigation() {
+    setState(() {
+      _isRoutePreview = false;
+      _headingUp = true;
+      _isFollowingMember = false;
+      _inRouteOverview = false;
+      _currentZoom = 17.0;
+    });
+    // プレビュー（3色） → ナビ（選択ルートのみオレンジ）に切替
+    _rebuildPolylines();
+    _routeOverviewTimer?.cancel();
+    if (_headingUp) {
+      _moveCameraWithBearing(_myPosition, _currentBearing);
+    } else {
+      _animateCamera(CameraUpdate.newLatLngZoom(_myPosition, 17.0), programmatic: true);
+    }
+  }
+
+  // 「このルートで出発」: 自分のルートを確定してナビ開始。Firebase は触らない。
+  // 共有したい時は別途「ルート共有」ボタンを押す。
+  void _confirmRouteAndStartNav() {
+    _startNavigation();
+  }
+
+  // プレビューを破棄して目的地検索ダイアログを再表示する。
+  // _groupDestination をローカルでクリアするだけで Firebase には触れない
+  // （プレビュー中は元々書き込んでいないため、他メンバーへの影響はない）。
+  void _cancelRoutePreview() {
+    _routeOverviewTimer?.cancel();
+    setState(() {
+      _groupDestination = null;
+      _groupDestName = '';
+      _isRoutePreview = false;
+      _isShared = false;
+      _polylines = {};
+      _routes = [];
+      _selectedRouteIndex = 0;
+      _headingUp = false;
+      _inRouteOverview = false;
+    });
+    _updateDestinationMarker();
+    _setPersonalDestination();
+  }
+
+  // トグルタップハンドラ：500ms デバウンス後に Firebase 書き込み + 即再検索
+  // クールダウン無視で即発火するため _fetchRoute に force: true を渡す
+  // プレビュー中は Firebase 書き込みをスキップし、ローカル再検索のみ走らせる
+  void _onRoutePreferenceToggle(String newPref) {
+    if (_routePreference == newPref) return;
+    setState(() => _routePreference = newPref);
+    _routePreferenceDebounceTimer?.cancel();
+    _routePreferenceDebounceTimer = Timer(const Duration(milliseconds: 500), () {
+      if (!mounted) return;
+      debugPrint('[Phase6] トグル → preference=$newPref (debounced, preview=$_isRoutePreview, shared=$_isShared)');
+      // Firebase に共有済みの時のみ書き込む。プレビュー中・ローカル確定中はローカル再検索のみ。
+      if (_isShared) {
+        _persistRoutePreference();
+      }
+      if (_groupDestination != null) {
+        _fetchRoute(_groupDestination!, isRerouting: true, force: true);
+      }
+    });
+  }
+
+  // routePreference を Firebase の destination ノードに部分パス書き込み（他フィールドは保護）
+  Future<void> _persistRoutePreference() async {
+    if (_groupDestination == null) return;
+    await _db
+        .child('rooms/${widget.roomCode}/destination/routePreference')
+        .set(_routePreference);
+  }
+
+  // ルート優先度トグル（iOS Settings 風）
+  // 目的地未設定時は非表示。タップで _routePreference を切替し 500ms デバウンスで再検索。
+  Widget _buildRoutePreferenceToggle() {
+    if (_groupDestination == null) return const SizedBox.shrink();
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      height: 40,
+      padding: const EdgeInsets.all(3),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF1EFE8),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Row(
+        children: [
+          _buildToggleSegment(
+            label: '🛣 高速優先',
+            isSelected: _routePreference == 'highway',
+            onTap: () => _onRoutePreferenceToggle('highway'),
+          ),
+          _buildToggleSegment(
+            label: '🚗 下道優先',
+            isSelected: _routePreference == 'local',
+            onTap: () => _onRoutePreferenceToggle('local'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildToggleSegment({
+    required String label,
+    required bool isSelected,
+    required VoidCallback onTap,
+  }) {
+    return Expanded(
+      child: GestureDetector(
+        onTap: onTap,
+        behavior: HitTestBehavior.opaque,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 200),
+          decoration: BoxDecoration(
+            color: isSelected ? const Color(0xFFFF6B35) : Colors.transparent,
+            borderRadius: BorderRadius.circular(17),
+          ),
+          alignment: Alignment.center,
+          child: Text(
+            label,
+            style: TextStyle(
+              color: isSelected
+                  ? Colors.white
+                  : const Color(0xFF5F5E5A),
+              fontSize: 13,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+        ),
+      ),
     );
   }
 
@@ -1967,7 +2480,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
       child: LayoutBuilder(
         builder: (context, constraints) {
-          const int buttonCount = 4; // 「現在地」はマップ右下FABに移行
+          const int buttonCount = 4; // 「現在地」は右下FAB（「ルート共有」はFB書き込み専用ボタンとして常設）
           const double spacing = 8.0;
           final double btnWidth =
               ((constraints.maxWidth - spacing * (buttonCount - 1)) / buttonCount)
@@ -1990,8 +2503,11 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                           _groupDestination = null;
                           _groupDestName = '';
                           _polylines = {};
-                          _routePoints = [];
+                          _routes = [];
+                          _selectedRouteIndex = 0;
                           _headingUp = false;
+                          _isRoutePreview = false;
+                          _isShared = false;
                         });
                         _animateCameraWithBearing(_myPosition, 0);
                         _updateDestinationMarker();
@@ -2212,4 +2728,18 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     if (bearing < 112.5) return '東';
     return '南東';
   }
+}
+
+// Directions API から取得した 1 本のルート情報。複数ルート (alternatives=true) の保持に使用。
+class _Route {
+  final List<LatLng> points;
+  final String summary;
+  final String durationText;
+  final String distanceText;
+  const _Route({
+    required this.points,
+    required this.summary,
+    required this.durationText,
+    required this.distanceText,
+  });
 }
