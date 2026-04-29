@@ -148,10 +148,6 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     Color(0xFF43A047), // 緑
   ];
 
-  // [DEBUG] 位置情報を強制的に上書きする値。null なら GPS の値を使う。
-  // 画面左下のバグアイコンタップでセット、長押しで解除。逸脱再検索バグの調査用。
-  LatLng? _debugLocationOverride;
-
   // 逸脱判定調査用ログバッファ。最新200行保持。アプリ内ログ画面で表示。
   // 公開版にも入れて常時収集（メモリ消費は微小）。表示のオン/オフは _debugLogEnabled で制御。
   final List<String> _debugLogBuffer = [];
@@ -1427,15 +1423,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       locationSettings: _buildLocationSettings(),
     ).listen((pos) async {
       if (!mounted) return;
-      setState(() {
-        _myPosition = LatLng(pos.latitude, pos.longitude);
-        // [DEBUG] オーバーライドが設定されていれば GPS の値を上書き
-        // 位置オーバーライドが設定されていれば GPS の値を上書き
-        // （隠しデバッグメニュー解禁時のみボタンが表示される。それ以外は常に null）
-        if (_debugLocationOverride != null) {
-          _myPosition = _debugLocationOverride!;
-        }
-      });
+      setState(() => _myPosition = LatLng(pos.latitude, pos.longitude));
       final spd = pos.speed;
       // 負値（取得不可）は 0 扱い。bearing ガードの外で常に更新
       _currentSpeed = spd > 0 ? spd : 0.0;
@@ -1484,15 +1472,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       }
       final pos = await Geolocator.getCurrentPosition();
       if (!mounted) return;
-      setState(() {
-        _myPosition = LatLng(pos.latitude, pos.longitude);
-        // [DEBUG] オーバーライドが設定されていれば GPS の値を上書き
-        // 位置オーバーライドが設定されていれば GPS の値を上書き
-        // （隠しデバッグメニュー解禁時のみボタンが表示される。それ以外は常に null）
-        if (_debugLocationOverride != null) {
-          _myPosition = _debugLocationOverride!;
-        }
-      });
+      setState(() => _myPosition = LatLng(pos.latitude, pos.longitude));
       if (_shareLocation) {
         await _db.child('rooms/${widget.roomCode}/members/${widget.userId}').update({
           'nickname': widget.nickname,
@@ -2237,42 +2217,6 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                       ),
                     ),
                 ],
-              ),
-            ),
-          ),
-        // 逸脱再検索バグ調査用：位置を強制的に100m北にズラす。
-        // タップで _debugLocationOverride をセット → 次回位置更新で _myPosition が上書きされる。
-        // 長押しでクリア。隠しデバッグメニュー解禁時のみ表示。
-        if (_debugLogEnabled)
-          Positioned(
-            left: 12,
-            bottom: 200,
-            child: GestureDetector(
-              onTap: () {
-                setState(() {
-                  _debugLocationOverride = LatLng(
-                    _myPosition.latitude + 0.0009, // 約100m北
-                    _myPosition.longitude,
-                  );
-                  _myPosition = _debugLocationOverride!;
-                });
-                debugPrint('[DEBUG] 位置を100m北にズラした: $_debugLocationOverride');
-                _checkRouteDeviation();
-              },
-              onLongPress: () {
-                setState(() {
-                  _debugLocationOverride = null;
-                });
-                debugPrint('[DEBUG] 位置オーバーライドをクリア');
-              },
-              child: Container(
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: Colors.purple.withValues(alpha: 0.85),
-                  borderRadius: BorderRadius.circular(24),
-                  boxShadow: const [BoxShadow(color: Colors.black38, blurRadius: 4)],
-                ),
-                child: const Icon(Icons.bug_report, color: Colors.white, size: 24),
               ),
             ),
           ),
