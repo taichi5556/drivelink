@@ -5,7 +5,6 @@ import 'dart:io';
 import 'dart:ui' as ui;
 
 import 'package:firebase_core/firebase_core.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
@@ -153,10 +152,16 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   // 画面左下のバグアイコンタップでセット、長押しで解除。逸脱再検索バグの調査用。
   LatLng? _debugLocationOverride;
 
-  // [DEBUG-TEMP] 逸脱判定調査用ログバッファ。最新200行保持。
-  // 後で削除予定（バグ原因特定後）。アプリ内ログ画面で表示。
+  // 逸脱判定調査用ログバッファ。最新200行保持。アプリ内ログ画面で表示。
+  // 公開版にも入れて常時収集（メモリ消費は微小）。表示のオン/オフは _debugLogEnabled で制御。
   final List<String> _debugLogBuffer = [];
   static const int _debugLogMaxLines = 200;
+
+  // 隠しデバッグメニュー（TouriLink ロゴ10回タップで解禁/無効）。
+  // バグアイコン・位置オーバーライドボタン等の表示制御。
+  bool _debugLogEnabled = false;
+  int _debugTapCount = 0;
+  DateTime? _lastDebugTapTime;
 
   void _appendDebugLog(String msg) {
     final timestamp = DateTime.now().toIso8601String().substring(11, 19);
@@ -1425,7 +1430,9 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       setState(() {
         _myPosition = LatLng(pos.latitude, pos.longitude);
         // [DEBUG] オーバーライドが設定されていれば GPS の値を上書き
-        if (kDebugMode && _debugLocationOverride != null) {
+        // 位置オーバーライドが設定されていれば GPS の値を上書き
+        // （隠しデバッグメニュー解禁時のみボタンが表示される。それ以外は常に null）
+        if (_debugLocationOverride != null) {
           _myPosition = _debugLocationOverride!;
         }
       });
@@ -1480,7 +1487,9 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       setState(() {
         _myPosition = LatLng(pos.latitude, pos.longitude);
         // [DEBUG] オーバーライドが設定されていれば GPS の値を上書き
-        if (kDebugMode && _debugLocationOverride != null) {
+        // 位置オーバーライドが設定されていれば GPS の値を上書き
+        // （隠しデバッグメニュー解禁時のみボタンが表示される。それ以外は常に null）
+        if (_debugLocationOverride != null) {
           _myPosition = _debugLocationOverride!;
         }
       });
@@ -1802,19 +1811,25 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('TouriLink',
-                style: GoogleFonts.audiowide(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
+            // TouriLink ロゴ：10回連打で隠しデバッグメニュー解禁/無効を切替
+            GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: _onLogoTapped,
+              child: Text('TouriLink',
+                  style: GoogleFonts.audiowide(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
+            ),
             Text('ルーム: ${widget.roomCode} | ${_members.length}人が走行中',
                 style: const TextStyle(color: Colors.grey, fontSize: 12)),
           ],
         ),
         actions: [
-          // [DEBUG-TEMP] 逸脱判定ログ表示ボタン（バグ調査用、後で削除）
-          IconButton(
-            tooltip: '逸脱判定ログ',
-            icon: const Icon(Icons.bug_report, color: Colors.purple),
-            onPressed: _showDebugLogDialog,
-          ),
+          // 隠しデバッグメニュー（TouriLink ロゴ10回タップで解禁時のみ表示）
+          if (_debugLogEnabled)
+            IconButton(
+              tooltip: '逸脱判定ログ',
+              icon: const Icon(Icons.bug_report, color: Colors.purple),
+              onPressed: _showDebugLogDialog,
+            ),
           // 位置共有スイッチ（GPSラベル付き）
           Row(
             mainAxisSize: MainAxisSize.min,
@@ -2225,10 +2240,10 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
               ),
             ),
           ),
-        // [DEBUG] 逸脱再検索バグ調査用：位置を強制的に100m北にズラす。
+        // 逸脱再検索バグ調査用：位置を強制的に100m北にズラす。
         // タップで _debugLocationOverride をセット → 次回位置更新で _myPosition が上書きされる。
-        // 長押しでクリア。debug ビルドのみ表示。
-        if (kDebugMode)
+        // 長押しでクリア。隠しデバッグメニュー解禁時のみ表示。
+        if (_debugLogEnabled)
           Positioned(
             left: 12,
             bottom: 200,
@@ -2265,7 +2280,35 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     );
   }
 
-  // [DEBUG-TEMP] 逸脱判定ログ画面（後で削除）
+  // TouriLink ロゴ10回連打で隠しデバッグメニューの有効/無効を切替。
+  // 直近2秒以内の連続タップのみカウントし、それ以外でリセット。
+  void _onLogoTapped() {
+    final now = DateTime.now();
+    if (_lastDebugTapTime != null &&
+        now.difference(_lastDebugTapTime!).inSeconds > 2) {
+      _debugTapCount = 0;
+    }
+    _debugTapCount++;
+    _lastDebugTapTime = now;
+
+    if (_debugTapCount >= 10) {
+      setState(() {
+        _debugLogEnabled = !_debugLogEnabled;
+        _debugTapCount = 0;
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(_debugLogEnabled ? '🐛 デバッグメニュー有効' : 'デバッグメニュー無効'),
+            duration: const Duration(seconds: 1),
+            backgroundColor: const Color(0xFF1A3A5C),
+          ),
+        );
+      }
+    }
+  }
+
+  // 逸脱判定ログ画面（隠しデバッグメニュー）
   void _showDebugLogDialog() {
     showDialog<void>(
       context: context,
