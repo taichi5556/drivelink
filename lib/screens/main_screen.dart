@@ -860,14 +860,18 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     return descriptor;
   }
 
-  // 指定ルートが他のどのルートとも被らない「ユニーク区間」の最長連続セグメントの中央点を返す。
-  // 吹き出しが共通区間で重なるのを避けるために使用。ユニーク区間が無い場合は単純中央にフォールバック。
+  // 指定ルートが他のどのルートとも被らない「ユニーク区間」の最長連続セグメント上に
+  // ルートインデックスごとに分散させた比率位置を返す。
+  // 比率は (routeIndex + 1) / (N + 1) で 3本なら 25%/50%/75%、2本なら 33%/67%、1本なら 50%。
+  // ユニーク区間が無い／ルート1本の場合も同じ比率で全 points 上に配置（重なり軽減）。
   // 距離は球面ではなく緯度経度の Manhattan 距離で近似（位置決め用途には十分）。
   LatLng _findUniqueRouteMidpoint(int routeIndex, List<_Route> allRoutes) {
     final route = allRoutes[routeIndex];
     if (route.points.isEmpty) return const LatLng(0, 0);
+    final ratio = (routeIndex + 1) / (allRoutes.length + 1);
     if (allRoutes.length <= 1) {
-      return route.points[route.points.length ~/ 2];
+      return route.points[(route.points.length * ratio).floor()
+          .clamp(0, route.points.length - 1)];
     }
 
     const double thresholdDeg = 0.005; // 約500m相当
@@ -912,9 +916,13 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     }
 
     if (bestStart < 0) {
-      return route.points[route.points.length ~/ 2];
+      // ユニーク区間なし → 全 points 上で比率位置にフォールバック
+      return route.points[(route.points.length * ratio).floor()
+          .clamp(0, route.points.length - 1)];
     }
-    return route.points[bestStart + bestLen ~/ 2];
+    // ユニーク区間内の比率位置
+    final offsetInSegment = (bestLen * ratio).floor().clamp(0, bestLen - 1);
+    return route.points[bestStart + offsetInSegment];
   }
 
   // ルート時間吹き出しのビットマップを生成。
@@ -1067,7 +1075,11 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
         markerId: MarkerId('route_bubble_$i'),
         position: mid,
         icon: bubble,
-        anchor: const Offset(0.5, 0.5),
+        // anchor (0.5, 1.0): 吹き出しの底辺中央を LatLng に合わせ、
+        // 吹き出しを LatLng の真上に伸ばす。
+        // Marker は Polyline より上のレイヤーで描画されるため、
+        // 中心配置だと選択中ルートが大きく隠れる問題への対策。
+        anchor: const Offset(0.5, 1.0),
         zIndexInt: isSelected ? 10 : 5,
         onTap: () => _selectRoute(i),
         consumeTapEvents: true,
