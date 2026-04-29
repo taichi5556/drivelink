@@ -77,8 +77,13 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
 
   // 目的地候補をタップしてルート描画した直後の「プレビュー中」フラグ。
   // true の間は「このルートで出発」「やめる」フローティングを表示し、
-  // トグル切替時の Firebase 書き込みをスキップする（ローカルの再検索だけ走らせる）。
+  // ナビ開始系の処理（ヘディングアップ自動 ON、5秒後の現在地ズーム復帰）をスキップする。
   bool _isRoutePreview = false;
+
+  // 目的地が Firebase に共有済みかどうか。
+  // 自分が「ルート共有」ボタンを押した時、または他メンバーから受信した時に true。
+  // トグル切替時の Firebase 書き込み判定に使う（true のときだけ書き込む）。
+  bool _isShared = false;
 
   // ルート逸脱自動再検索
   DateTime? _lastRerouteTime;     // API 成功時刻（クールダウン基準）
@@ -422,6 +427,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
           _groupDestName = '';
           _routePreference = 'highway';
           _isRoutePreview = false;
+          _isShared = false;
         });
         _updateDestinationMarker();
         return;
@@ -440,12 +446,13 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       if (lat == null || lng == null) return;
       final newDest = LatLng(lat, lng);
       if (senderUid != widget.userId) {
-        // 他メンバーが共有した目的地を受信したらプレビューを強制解除
-        // （自分が候補をプレビュー中でも、他者が先に共有を確定したら確定状態に遷移）
+        // 他メンバーが共有した目的地を受信したらプレビューを強制解除し、
+        // Firebase 同期済み状態に遷移（_isShared=true）
         setState(() {
           _groupDestination = newDest;
           _groupDestName = name;
           _isRoutePreview = false;
+          _isShared = true;
         });
         _updateDestinationMarker();
         _saveDestHistory(name, lat, lng);
@@ -984,8 +991,9 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
               } else {
                 _selectedRouteIndex = 0;
               }
-              // 再検索時はヘディングアップ・追跡状態を変更しない
-              if (!isRerouting) {
+              // 再検索時 / プレビュー中はヘディングアップ・追跡状態を変更しない
+              // （プレビュー中はナビ開始扱いにせず、ユーザーが「このルートで出発」を押すまで保留）
+              if (!isRerouting && !_isRoutePreview) {
                 _headingUp = true;
                 _isFollowingMember = false;
               }
@@ -1014,19 +1022,22 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                 );
                 _inRouteOverview = true;
                 _animateCamera(CameraUpdate.newLatLngBounds(bounds, 80), programmatic: true);
-                // 5秒後に通常ズームへ自動復帰
-                _routeOverviewTimer = Timer(const Duration(seconds: 5), () {
-                  if (!mounted || _routePoints.isEmpty) return;
-                  _inRouteOverview = false;
-                  _currentZoom = 17.0;
-                  // ユーザーが地図操作中（追従停止中）なら強制復帰しない
-                  if (_isFollowingMember) return;
-                  if (_headingUp) {
-                    _moveCameraWithBearing(_myPosition, _currentBearing);
-                  } else {
-                    _animateCamera(CameraUpdate.newLatLngZoom(_myPosition, 17.0), programmatic: true);
-                  }
-                });
+                // 5秒後に通常ズームへ自動復帰（プレビュー中はセットしない＝ユーザーが
+                // 「このルートで出発」を押した時に _startNavigation がセットする）
+                if (!_isRoutePreview) {
+                  _routeOverviewTimer = Timer(const Duration(seconds: 5), () {
+                    if (!mounted || _routePoints.isEmpty) return;
+                    _inRouteOverview = false;
+                    _currentZoom = 17.0;
+                    // ユーザーが地図操作中（追従停止中）なら強制復帰しない
+                    if (_isFollowingMember) return;
+                    if (_headingUp) {
+                      _moveCameraWithBearing(_myPosition, _currentBearing);
+                    } else {
+                      _animateCamera(CameraUpdate.newLatLngZoom(_myPosition, 17.0), programmatic: true);
+                    }
+                  });
+                }
               }
             }
             succeeded = true;
@@ -1246,7 +1257,12 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
             if (_groupDestination != null)
               TextButton(
                 onPressed: () {
-                  setState(() { _groupDestination = null; _groupDestName = ''; });
+                  setState(() {
+                    _groupDestination = null;
+                    _groupDestName = '';
+                    _isRoutePreview = false;
+                    _isShared = false;
+                  });
                   _updateDestinationMarker();
                   Navigator.pop(ctx);
                 },
@@ -1269,6 +1285,11 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       );
       return;
     }
+    // プレビュー中に直接「ルート共有」を押した場合はナビも同時に開始する
+    // （ローカル確定済みの場合は _isRoutePreview=false なので何もしない）
+    if (_isRoutePreview) {
+      _startNavigation();
+    }
     final dest = _activeDestination!;
     final name = _activeDestName;
     await _db.child('rooms/${widget.roomCode}/destination').set({
@@ -1281,7 +1302,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       'routePreference': _routePreference,
     });
     if (mounted) {
-      setState(() => _isRoutePreview = false);
+      setState(() => _isShared = true);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('📍 「$name」をグループに共有しました'), backgroundColor: const Color(0xFF1A3A5C)),
       );
@@ -2019,7 +2040,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   GestureDetector(
-                    onTap: _shareGroupDestination,
+                    onTap: _confirmRouteAndStartNav,
                     child: Container(
                       padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
                       decoration: BoxDecoration(
@@ -2072,18 +2093,50 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     );
   }
 
+  // ナビ開始処理（共通ヘルパー）。
+  // プレビュー中フラグの解除、ヘディングアップ ON、追跡解除、5秒後に概観 → 通常ズームの復帰タイマーをセット。
+  // 「このルートで出発」と「ルート共有（プレビュー中の直接共有）」の両方から呼ぶ。
+  void _startNavigation() {
+    setState(() {
+      _isRoutePreview = false;
+      _headingUp = true;
+      _isFollowingMember = false;
+    });
+    _routeOverviewTimer?.cancel();
+    _routeOverviewTimer = Timer(const Duration(seconds: 5), () {
+      if (!mounted || _routePoints.isEmpty) return;
+      _inRouteOverview = false;
+      _currentZoom = 17.0;
+      if (_isFollowingMember) return;
+      if (_headingUp) {
+        _moveCameraWithBearing(_myPosition, _currentBearing);
+      } else {
+        _animateCamera(CameraUpdate.newLatLngZoom(_myPosition, 17.0), programmatic: true);
+      }
+    });
+  }
+
+  // 「このルートで出発」: 自分のルートを確定してナビ開始。Firebase は触らない。
+  // 共有したい時は別途「ルート共有」ボタンを押す。
+  void _confirmRouteAndStartNav() {
+    _startNavigation();
+  }
+
   // プレビューを破棄して目的地検索ダイアログを再表示する。
   // _groupDestination をローカルでクリアするだけで Firebase には触れない
   // （プレビュー中は元々書き込んでいないため、他メンバーへの影響はない）。
   void _cancelRoutePreview() {
+    _routeOverviewTimer?.cancel();
     setState(() {
       _groupDestination = null;
       _groupDestName = '';
       _isRoutePreview = false;
+      _isShared = false;
       _polylines = {};
       _routes = [];
       _selectedRouteIndex = 0;
       _headingUp = false;
+      _inRouteOverview = false;
     });
     _updateDestinationMarker();
     _setPersonalDestination();
@@ -2098,8 +2151,9 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     _routePreferenceDebounceTimer?.cancel();
     _routePreferenceDebounceTimer = Timer(const Duration(milliseconds: 500), () {
       if (!mounted) return;
-      debugPrint('[Phase6] トグル → preference=$newPref (debounced, preview=$_isRoutePreview)');
-      if (!_isRoutePreview) {
+      debugPrint('[Phase6] トグル → preference=$newPref (debounced, preview=$_isRoutePreview, shared=$_isShared)');
+      // Firebase に共有済みの時のみ書き込む。プレビュー中・ローカル確定中はローカル再検索のみ。
+      if (_isShared) {
         _persistRoutePreference();
       }
       if (_groupDestination != null) {
@@ -2222,7 +2276,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
       child: LayoutBuilder(
         builder: (context, constraints) {
-          const int buttonCount = 3; // 「ルート共有」はプレビュー中フローティングへ移行、「現在地」は右下FAB
+          const int buttonCount = 4; // 「現在地」は右下FAB（「ルート共有」はFB書き込み専用ボタンとして常設）
           const double spacing = 8.0;
           final double btnWidth =
               ((constraints.maxWidth - spacing * (buttonCount - 1)) / buttonCount)
@@ -2248,11 +2302,23 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                           _routes = [];
                           _selectedRouteIndex = 0;
                           _headingUp = false;
+                          _isRoutePreview = false;
+                          _isShared = false;
                         });
                         _animateCameraWithBearing(_myPosition, 0);
                         _updateDestinationMarker();
                       }
                     : _setPersonalDestination,
+                width: btnWidth,
+              ),
+              const SizedBox(width: spacing),
+              _buildActionBtn(
+                icon: Icons.share,
+                label: 'ルート共有',
+                color: _groupDestination != null
+                    ? const Color(0xFF00D4FF)
+                    : Colors.grey.shade800,
+                onTap: _groupDestination != null ? _shareGroupDestination : null,
                 width: btnWidth,
               ),
               const SizedBox(width: spacing),
