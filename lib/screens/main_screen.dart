@@ -69,8 +69,11 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   String get _activeDestName => _groupDestName;
 
   // ルート優先度（'highway' = 高速優先 / 'local' = 下道優先）
-  // Phase 2 で Firebase destination ノードと同期予定。現状はローカル既定値のみ。
+  // Firebase destination ノードと双方向同期。
   String _routePreference = 'highway';
+
+  // Phase 3: トグル UI の見た目専用フラグ（Phase 4 で _routePreference に統合予定）
+  bool _routeToggleVisualState = true; // true = 高速優先表示, false = 下道優先表示
 
   // ルート逸脱自動再検索
   DateTime? _lastRerouteTime;     // API 成功時刻（クールダウン基準）
@@ -1709,6 +1712,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
         child: Column(
           children: [
             if (_remainingTime.isNotEmpty) _buildTimerBanner(),
+            _buildRoutePreferenceToggle(),
             Expanded(child: _buildMap()),
             _buildBottomSection(),
             if (_isBannerAdLoaded) _buildAdBanner(),
@@ -1731,6 +1735,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
               child: Column(
                 children: [
                   if (_remainingTime.isNotEmpty) _buildTimerBanner(),
+                  _buildRoutePreferenceToggle(),
                   Expanded(child: _buildMap()),
                 ],
               ),
@@ -1941,6 +1946,66 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
           ),
         ),
       ],
+    );
+  }
+
+  // ルート優先度トグル（iOS Settings 風）
+  // 目的地未設定時は非表示。Phase 3 では _routeToggleVisualState だけを切り替え、_routePreference には影響しない。
+  Widget _buildRoutePreferenceToggle() {
+    if (_groupDestination == null) return const SizedBox.shrink();
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      height: 40,
+      padding: const EdgeInsets.all(3),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF1EFE8),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Row(
+        children: [
+          _buildToggleSegment(
+            label: '🛣 高速優先',
+            isSelected: _routeToggleVisualState,
+            onTap: () => setState(() => _routeToggleVisualState = true),
+          ),
+          _buildToggleSegment(
+            label: '🚗 下道優先',
+            isSelected: !_routeToggleVisualState,
+            onTap: () => setState(() => _routeToggleVisualState = false),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildToggleSegment({
+    required String label,
+    required bool isSelected,
+    required VoidCallback onTap,
+  }) {
+    return Expanded(
+      child: GestureDetector(
+        onTap: onTap,
+        behavior: HitTestBehavior.opaque,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 200),
+          decoration: BoxDecoration(
+            color: isSelected ? const Color(0xFFFF6B35) : Colors.transparent,
+            borderRadius: BorderRadius.circular(17),
+          ),
+          alignment: Alignment.center,
+          child: Text(
+            label,
+            style: TextStyle(
+              color: isSelected
+                  ? Colors.white
+                  : const Color(0xFF5F5E5A),
+              fontSize: 13,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+        ),
+      ),
     );
   }
 
