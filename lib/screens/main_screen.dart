@@ -860,6 +860,63 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     return descriptor;
   }
 
+  // 指定ルートが他のどのルートとも被らない「ユニーク区間」の最長連続セグメントの中央点を返す。
+  // 吹き出しが共通区間で重なるのを避けるために使用。ユニーク区間が無い場合は単純中央にフォールバック。
+  // 距離は球面ではなく緯度経度の Manhattan 距離で近似（位置決め用途には十分）。
+  LatLng _findUniqueRouteMidpoint(int routeIndex, List<_Route> allRoutes) {
+    final route = allRoutes[routeIndex];
+    if (route.points.isEmpty) return const LatLng(0, 0);
+    if (allRoutes.length <= 1) {
+      return route.points[route.points.length ~/ 2];
+    }
+
+    const double thresholdDeg = 0.005; // 約500m相当
+
+    final isUnique = List<bool>.filled(route.points.length, false);
+    for (int i = 0; i < route.points.length; i++) {
+      final p = route.points[i];
+      bool unique = true;
+      for (int j = 0; j < allRoutes.length; j++) {
+        if (j == routeIndex) continue;
+        double minDist = double.infinity;
+        for (final q in allRoutes[j].points) {
+          final d = (p.latitude - q.latitude).abs() +
+              (p.longitude - q.longitude).abs();
+          if (d < minDist) minDist = d;
+          if (minDist < thresholdDeg) break;
+        }
+        if (minDist < thresholdDeg) {
+          unique = false;
+          break;
+        }
+      }
+      isUnique[i] = unique;
+    }
+
+    int bestStart = -1;
+    int bestLen = 0;
+    int curStart = -1;
+    int curLen = 0;
+    for (int i = 0; i < isUnique.length; i++) {
+      if (isUnique[i]) {
+        if (curStart < 0) curStart = i;
+        curLen++;
+        if (curLen > bestLen) {
+          bestLen = curLen;
+          bestStart = curStart;
+        }
+      } else {
+        curStart = -1;
+        curLen = 0;
+      }
+    }
+
+    if (bestStart < 0) {
+      return route.points[route.points.length ~/ 2];
+    }
+    return route.points[bestStart + bestLen ~/ 2];
+  }
+
   // ルート時間吹き出しのビットマップを生成。
   // 選択中: オレンジ背景＋白文字 / 代替: 白背景＋黒文字＋オレンジ薄枠線。
   // 動的幅で TextPainter のサイズに合わせて生成し、imagePixelRatio 2.5 で表示サイズを縮小。
@@ -994,12 +1051,12 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       ));
     });
 
-    // ルート時間吹き出し（各ルートの中央付近に1つずつ配置）
+    // ルート時間吹き出し（各ルートのユニーク区間の中央に1つずつ配置）
     // 1本でも所要時間・距離が見えると便利なため _routes が空でなければ表示
     for (int i = 0; i < _routes.length; i++) {
       final pts = _routes[i].points;
       if (pts.isEmpty) continue;
-      final mid = pts[pts.length ~/ 2];
+      final mid = _findUniqueRouteMidpoint(i, _routes);
       final isSelected = i == _selectedRouteIndex;
       final bubble = await _getRouteBubbleMarker(
         durationText: _routes[i].durationText,
