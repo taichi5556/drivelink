@@ -1934,10 +1934,16 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
             Container(
               color: Colors.white,
               padding: const EdgeInsets.all(12),
-              child: QrImageView(
-                data: 'https://drivelink-a7ffb.web.app/join?room=${widget.roomCode}',
-                version: QrVersions.auto,
-                size: 220,
+              // SizedBox で明示サイズを与える。AlertDialog 内部の IntrinsicWidth が
+              // QrImageView 内部の LayoutBuilder に intrinsic を要求してクラッシュするのを防ぐ。
+              child: SizedBox(
+                width: 220,
+                height: 220,
+                child: QrImageView(
+                  data: 'https://drivelink-a7ffb.web.app/join?room=${widget.roomCode}',
+                  version: QrVersions.auto,
+                  size: 220,
+                ),
               ),
             ),
             const SizedBox(height: 12),
