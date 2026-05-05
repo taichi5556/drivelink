@@ -1661,8 +1661,8 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
 
   // Phase A-4: ナビ確定後（_isRoutePreview=false かつ _routes.isNotEmpty）の
   // カメラ表示用設定を返すヘルパー。
-  // - ナビ中: 自車を画面下1/3 に置くため bearing 方向に 200m オフセット、tilt 60度の3Dビュー
-  //   （初回 100m では中央寄りすぎたため 200m に拡大）
+  // - ナビ中: 自車を画面下1/3 に置くため bearing 方向にオフセット、tilt 60度の3Dビュー
+  //   縦画面 200m / 横画面 100m（横画面は縦サイズが狭く 200m だと画面外に出るため）
   // - それ以外（プレビュー中・目的地なし・案内終了直後）: target そのまま、tilt 0
   // 約数 111320 は 1度あたりの緯度メートル換算。経度は cos(lat) で補正。
   ({LatLng target, double tilt}) _navCameraConfig(LatLng position, double bearing) {
@@ -1670,7 +1670,8 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     if (!isNavigating) {
       return (target: position, tilt: 0.0);
     }
-    const offsetMeters = 200.0;
+    final isLandscape = MediaQuery.of(context).orientation == Orientation.landscape;
+    final offsetMeters = isLandscape ? 100.0 : 200.0;
     final dx = sin(bearing * pi / 180) * offsetMeters;
     final dy = cos(bearing * pi / 180) * offsetMeters;
     final cosLat = cos(position.latitude * pi / 180);
