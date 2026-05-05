@@ -20,6 +20,7 @@ import 'package:app_links/app_links.dart';
 import 'package:flutter_polyline_points/flutter_polyline_points.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:qr_flutter/qr_flutter.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 class MainScreen extends StatefulWidget {
   final String userId;
@@ -837,45 +838,101 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     return _warningMarkerCache!;
   }
 
-  Future<BitmapDescriptor> _getVehicleMarker(String vehicleType, bool isMe) async {
-    final key = '$vehicleType-$isMe';
+  // Phase A-6: 車両アイコンに名前ラベルを焼き込み。
+  // Canvas 144x104（円64x64 + ラベル領域 144x40）。円は Canvas 横幅の中央上に配置、
+  // ラベルは Canvas 横幅をフル活用して 5文字+省略（「タロウ太…」等）が確実に収まるサイズ。
+  // ニックネームは最大4文字、5文字以上は末尾「…」省略。空文字時はラベル無し（透過）。
+  // Marker 側で anchor=(0.5, 0.308) を指定して円中心(72,32)が地点位置に来るようにする。
+  Future<BitmapDescriptor> _getVehicleMarker(String vehicleType, bool isMe, String nickname) async {
+    final key = '$vehicleType-$isMe-$nickname';
     if (_markerCache.containsKey(key)) return _markerCache[key]!;
 
     final emoji = vehicleType == 'bike' ? '🏍' : '🚗';
     final bgColor = isMe ? const Color(0xFF1E90FF) : const Color(0xFFFF6B35);
-    // 高解像度で描画して imagePixelRatio で縮小表示（約20dp）
-    const size = 52.0;
+    const double iconSize = 64.0;             // 円直径
+    const double canvasWidth = 144.0;         // Canvas 横幅（ラベル収納用）
+    const double labelHeight = 40.0;
+    const double canvasHeight = iconSize + labelHeight; // 104
+    const double circleCx = canvasWidth / 2;  // 72
+    const double circleCy = iconSize / 2;     // 32
+    const double circleR = iconSize / 2 - 1;  // 31
 
     final recorder = ui.PictureRecorder();
     final canvas = Canvas(recorder);
 
-    // 背景円
+    // ── 上半分：円アイコン（Canvas 中央上に配置）──
     canvas.drawCircle(
-      const Offset(size / 2, size / 2),
-      size / 2 - 1,
+      const Offset(circleCx, circleCy),
+      circleR,
       Paint()..color = bgColor,
     );
     // 白枠
     canvas.drawCircle(
-      const Offset(size / 2, size / 2),
-      size / 2 - 1,
+      const Offset(circleCx, circleCy),
+      circleR,
       Paint()
         ..color = Colors.white
         ..style = PaintingStyle.stroke
         ..strokeWidth = 2,
     );
-
     // 絵文字
     final tp = TextPainter(textDirection: TextDirection.ltr)
-      ..text = TextSpan(text: emoji, style: const TextStyle(fontSize: 22))
+      ..text = TextSpan(text: emoji, style: const TextStyle(fontSize: 28))
       ..layout();
-    tp.paint(canvas, Offset((size - tp.width) / 2, (size - tp.height) / 2));
+    tp.paint(canvas, Offset(circleCx - tp.width / 2, circleCy - tp.height / 2));
+
+    // ── 下半分：名前ラベル（空文字時はスキップ）──
+    if (nickname.isNotEmpty) {
+      final shortName = nickname.length <= 4
+          ? nickname
+          : '${nickname.substring(0, 4)}…';
+
+      const double labelLeft = 4.0;
+      const double labelRight = canvasWidth - 4;        // 140
+      const double labelTop = iconSize + 2;              // 66
+      const double labelBottom = canvasHeight - 2;       // 102
+      final labelRect = RRect.fromLTRBR(
+        labelLeft, labelTop, labelRight, labelBottom,
+        const Radius.circular(4),
+      );
+      // 白背景
+      canvas.drawRRect(labelRect, Paint()..color = Colors.white);
+      // 細い黒枠（マップ背景に対する視認性確保）
+      canvas.drawRRect(
+        labelRect,
+        Paint()
+          ..color = Colors.black
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 0.5,
+      );
+      // 黒テキスト中央寄せ
+      final labelTp = TextPainter(
+        textDirection: TextDirection.ltr,
+        textAlign: TextAlign.center,
+      )
+        ..text = TextSpan(
+          text: shortName,
+          style: const TextStyle(
+            fontSize: 26,
+            color: Colors.black,
+            fontWeight: FontWeight.bold,
+          ),
+        )
+        ..layout(maxWidth: labelRight - labelLeft);
+      labelTp.paint(
+        canvas,
+        Offset(
+          (canvasWidth - labelTp.width) / 2,
+          labelTop + (labelBottom - labelTop - labelTp.height) / 2,
+        ),
+      );
+    }
 
     final picture = recorder.endRecording();
-    final image = await picture.toImage(size.toInt(), size.toInt());
+    final image = await picture.toImage(canvasWidth.toInt(), canvasHeight.toInt());
     final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
     if (bytes == null) return BitmapDescriptor.defaultMarker;
-    // imagePixelRatio: 2.5 → 画面上の表示サイズ = 52 / 2.5 ≈ 20dp
+    // imagePixelRatio: 2.5 → 画面上の表示サイズ = 64 / 2.5 ≈ 25.6dp（円部分）
     final descriptor = BitmapDescriptor.bytes(
       bytes.buffer.asUint8List(),
       imagePixelRatio: 2.5,
@@ -898,12 +955,15 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       final nick = m['nickname'] as String? ?? '';
       final vehicleType = m['vehicle_type'] as String? ?? 'car';
       final isMe = uid == widget.userId;
-      final icon = await _getVehicleMarker(vehicleType, isMe);
+      final icon = await _getVehicleMarker(vehicleType, isMe, nick);
       final stale = !isMe && _isStale(m);
       newMarkers.add(Marker(
         markerId: MarkerId(uid),
         position: LatLng(lat, lng),
         icon: icon,
+        // Phase A-6: 画像 144x104 のうち円中心(72,32)を地点位置にアンカー
+        // 32/104 ≈ 0.308。これでラベル分のズレを補正
+        anchor: const Offset(0.5, 0.308),
         alpha: stale ? 0.35 : 1.0,
         infoWindow: InfoWindow(title: nick),
       ));
@@ -1179,6 +1239,9 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       barrierDismissible: true,
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setStateDialog) => AlertDialog(
+          // 横画面（縦の利用可能領域が狭い）でも検索結果と「現在地を目的地に設定」が
+          // 全部見えるよう、ダイアログ全体を縦スクロール可能にする
+          scrollable: true,
           backgroundColor: const Color(0xFF0D1B2A),
           title: const Text('🔍 目的地を検索', style: TextStyle(color: Colors.white)),
           content: SizedBox(
@@ -1258,23 +1321,14 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                   )),
                 ],
                 const SizedBox(height: 4),
+                // 検索結果は最大5件のため Column に展開（AlertDialog.scrollable=true との競合回避）
                 if (searchResults.isNotEmpty)
-                  ConstrainedBox(
-                    constraints: const BoxConstraints(maxHeight: 250),
-                    child: ListView.builder(
-                      shrinkWrap: true,
-                      itemCount: searchResults.length,
-                      itemBuilder: (_, i) {
-                        final r = searchResults[i];
-                        return ListTile(
-                          leading: const Icon(Icons.place, color: Color(0xFF00D4FF)),
-                          title: Text(r['name'], style: const TextStyle(color: Colors.white, fontSize: 14)),
-                          subtitle: Text(r['address'], style: const TextStyle(color: Colors.grey, fontSize: 11), maxLines: 1, overflow: TextOverflow.ellipsis),
-                          onTap: () => selectDest(ctx, r['name'] as String, r['lat'] as double, r['lng'] as double),
-                        );
-                      },
-                    ),
-                  ),
+                  ...searchResults.map((r) => ListTile(
+                        leading: const Icon(Icons.place, color: Color(0xFF00D4FF)),
+                        title: Text(r['name'], style: const TextStyle(color: Colors.white, fontSize: 14)),
+                        subtitle: Text(r['address'], style: const TextStyle(color: Colors.grey, fontSize: 11), maxLines: 1, overflow: TextOverflow.ellipsis),
+                        onTap: () => selectDest(ctx, r['name'] as String, r['lat'] as double, r['lng'] as double),
+                      )),
                 const SizedBox(height: 4),
                 TextButton.icon(
                   icon: const Icon(Icons.my_location, color: Color(0xFF00D4FF), size: 18),
@@ -1325,11 +1379,9 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       );
       return;
     }
-    // プレビュー中に直接「ルート共有」を押した場合はナビも同時に開始する
-    // （ローカル確定済みの場合は _isRoutePreview=false なので何もしない）
-    if (_isRoutePreview) {
-      _startNavigation();
-    }
+    // Phase A-3: プレビュー中の暗黙ナビ開始を撤廃。
+    // _buildActionButtonItems 側で _isRoutePreview=true 中はボタン非活性化済みのため、
+    // ここに到達するのは「このルートで出発」確定後（_isRoutePreview=false）のみ。
     final dest = _activeDestination!;
     final name = _activeDestName;
     await _db.child('rooms/${widget.roomCode}/destination').set({
@@ -1591,12 +1643,114 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     _mapController!.animateCamera(update);
   }
 
+  // Phase A-4: 「現在地へ戻る」ボタンのダブルタップで全メンバーが画面に収まる範囲にズーム。
+  // - 自分から 10km 超のメンバーは除外し、SnackBar で通知
+  // - tilt 0、bearing 0、padding 80 の真俯瞰
+  // - _isFollowingMember=true を維持: GPS update のカメラ上書きをガード（行 1437/1479/1069）
+  // - 自分のみ or 全員遠すぎる場合は自分中心ズーム17にフォールバック
+  void _zoomToAllMembers() {
+    if (_mapController == null) return;
+    final List<LatLng> points = [_myPosition];
+    final List<String> excluded = [];
+    for (final entry in _members.entries) {
+      final uid = entry.key;
+      if (uid == widget.userId) continue;
+      final m = entry.value as Map;
+      if (m['lat'] == null || m['lng'] == null) continue;
+      final lat = (m['lat'] as num).toDouble();
+      final lng = (m['lng'] as num).toDouble();
+      final pos = LatLng(lat, lng);
+      if (_metersTo(pos, _myPosition) > 10000) {
+        excluded.add(m['nickname'] as String? ?? '?');
+        continue;
+      }
+      points.add(pos);
+    }
+    if (excluded.isNotEmpty && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('${excluded.join('、')}さんは10km以上離れているため範囲外'),
+          duration: const Duration(seconds: 3),
+        ),
+      );
+    }
+    if (points.length < 2) {
+      // 自分のみ → 自分中心ズーム17にフォールバック（ナビ中の3D解除も兼ねて真俯瞰）
+      setState(() {
+        _isFollowingMember = false;
+        _currentZoom = 17.0;
+      });
+      _animateCamera(
+        CameraUpdate.newLatLngZoom(_myPosition, 17.0),
+        programmatic: true,
+      );
+      return;
+    }
+    double minLat = points.first.latitude;
+    double maxLat = points.first.latitude;
+    double minLng = points.first.longitude;
+    double maxLng = points.first.longitude;
+    for (final p in points) {
+      if (p.latitude < minLat) minLat = p.latitude;
+      if (p.latitude > maxLat) maxLat = p.latitude;
+      if (p.longitude < minLng) minLng = p.longitude;
+      if (p.longitude > maxLng) maxLng = p.longitude;
+    }
+    final bounds = LatLngBounds(
+      southwest: LatLng(minLat, minLng),
+      northeast: LatLng(maxLat, maxLng),
+    );
+    _lastProgrammaticMoveAt = DateTime.now();
+    // 先に tilt/bearing を即時リセット（newLatLngBounds は target/zoom のみ更新のため）
+    _mapController!.moveCamera(
+      CameraUpdate.newCameraPosition(
+        CameraPosition(
+          target: _myPosition,
+          bearing: 0,
+          tilt: 0,
+          zoom: _currentZoom,
+        ),
+      ),
+    );
+    // 次に bounds に合わせてズーム調整
+    _mapController!.animateCamera(
+      CameraUpdate.newLatLngBounds(bounds, 80),
+    );
+  }
+
+  // Phase A-4: ナビ確定後（_isRoutePreview=false かつ _routes.isNotEmpty）の
+  // カメラ表示用設定を返すヘルパー。
+  // - ナビ中: 自車を画面下1/3 に置くため bearing 方向にオフセット、tilt 60度の3Dビュー
+  //   縦画面 200m / 横画面 100m（横画面は縦サイズが狭く 200m だと画面外に出るため）
+  // - それ以外（プレビュー中・目的地なし・案内終了直後）: target そのまま、tilt 0
+  // 約数 111320 は 1度あたりの緯度メートル換算。経度は cos(lat) で補正。
+  ({LatLng target, double tilt}) _navCameraConfig(LatLng position, double bearing) {
+    final isNavigating = !_isRoutePreview && _routes.isNotEmpty;
+    if (!isNavigating) {
+      return (target: position, tilt: 0.0);
+    }
+    final isLandscape = MediaQuery.of(context).orientation == Orientation.landscape;
+    final offsetMeters = isLandscape ? 100.0 : 200.0;
+    final dx = sin(bearing * pi / 180) * offsetMeters;
+    final dy = cos(bearing * pi / 180) * offsetMeters;
+    final cosLat = cos(position.latitude * pi / 180);
+    final offsetLat = position.latitude + dy / 111320;
+    final offsetLng = position.longitude + dx / (111320 * cosLat);
+    return (target: LatLng(offsetLat, offsetLng), tilt: 60.0);
+  }
+
   void _animateCameraWithBearing(LatLng target, double bearing) {
     if (_mapController == null) return;
     _lastProgrammaticMoveAt = DateTime.now();
+    final config = _navCameraConfig(target, bearing);
     _mapController!.animateCamera(
       CameraUpdate.newCameraPosition(
-        CameraPosition(target: target, bearing: bearing, zoom: _currentZoom, tilt: 0),
+        CameraPosition(
+          target: config.target,
+          bearing: bearing,
+          zoom: _currentZoom,
+          tilt: config.tilt,
+        ),
       ),
     );
   }
@@ -1605,9 +1759,15 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   void _moveCameraWithBearing(LatLng target, double bearing) {
     if (_mapController == null) return;
     _lastProgrammaticMoveAt = DateTime.now();
+    final config = _navCameraConfig(target, bearing);
     _mapController!.animateCamera(
       CameraUpdate.newCameraPosition(
-        CameraPosition(target: target, bearing: bearing, zoom: _currentZoom, tilt: 0),
+        CameraPosition(
+          target: config.target,
+          bearing: bearing,
+          zoom: _currentZoom,
+          tilt: config.tilt,
+        ),
       ),
     );
   }
@@ -1782,88 +1942,110 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   }
 
   // 縦向きレイアウト
+  // 縦・横レイアウト共用の AppBar（Phase A-2 で抽出）
+  PreferredSizeWidget _buildPrimaryAppBar() {
+    return AppBar(
+      backgroundColor: _blinkVisible ? _blinkColor.withValues(alpha: 0.4) : const Color(0xFF0A1628),
+      titleSpacing: 12,
+      title: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // TouriLink ロゴ：10回連打で隠しデバッグメニュー解禁/無効を切替
+          GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: _onLogoTapped,
+            child: Text('TouriLink',
+                style: GoogleFonts.audiowide(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
+          ),
+          Text('ルーム: ${widget.roomCode} | ${_members.length}人が走行中',
+              style: const TextStyle(color: Colors.grey, fontSize: 12)),
+        ],
+      ),
+      actions: [
+        // 隠しデバッグメニュー（TouriLink ロゴ10回タップで解禁時のみ表示）
+        if (_debugLogEnabled)
+          IconButton(
+            tooltip: '逸脱判定ログ',
+            icon: const Icon(Icons.bug_report, color: Colors.purple),
+            onPressed: _showDebugLogDialog,
+          ),
+        // 位置共有スイッチ（GPSラベル付き）
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              'GPS',
+              style: TextStyle(
+                color: _shareLocation ? Colors.green : Colors.grey,
+                fontSize: 12,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            Switch(
+              value: _shareLocation,
+              activeThumbColor: Colors.green,
+              inactiveThumbColor: Colors.grey,
+              materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              onChanged: (_) => _toggleLocationSharing(),
+            ),
+          ],
+        ),
+        PopupMenuButton<String>(
+          icon: const Icon(Icons.more_vert, color: Colors.white),
+          color: const Color(0xFF0D1B2A),
+          onSelected: (value) async {
+            if (value == 'qr') _showQrDialog();
+            if (value == 'share') _shareRoomCode();
+            if (value == 'privacy') {
+              final uri = Uri.parse('https://taichi5556.github.io/drivelink/privacy_policy.html');
+              final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
+              if (!ok && mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('ブラウザを起動できませんでした')),
+                );
+              }
+            }
+          },
+          itemBuilder: (ctx) => [
+            const PopupMenuItem(
+              value: 'qr',
+              child: Row(children: [
+                Icon(Icons.qr_code_rounded, color: Colors.white, size: 20),
+                SizedBox(width: 10),
+                Text('QRコードを表示', style: TextStyle(color: Colors.white)),
+              ]),
+            ),
+            const PopupMenuItem(
+              value: 'share',
+              child: Row(children: [
+                Icon(Icons.share_rounded, color: Colors.white, size: 20),
+                SizedBox(width: 10),
+                Text('ルームを共有', style: TextStyle(color: Colors.white)),
+              ]),
+            ),
+            const PopupMenuItem(
+              value: 'privacy',
+              child: Row(children: [
+                Icon(Icons.privacy_tip_outlined, color: Colors.white, size: 20),
+                SizedBox(width: 10),
+                Text('プライバシーポリシー', style: TextStyle(color: Colors.white)),
+              ]),
+            ),
+          ],
+        ),
+        TextButton.icon(
+          icon: const Icon(Icons.exit_to_app, color: Colors.white, size: 18),
+          label: const Text('退出', style: TextStyle(color: Colors.white, fontSize: 13)),
+          onPressed: _exitToLogin,
+        ),
+      ],
+    );
+  }
+
   Widget _buildPortraitLayout() {
     return Scaffold(
       backgroundColor: const Color(0xFF0A1628),
-      appBar: AppBar(
-        backgroundColor: _blinkVisible ? _blinkColor.withValues(alpha: 0.4) : const Color(0xFF0A1628),
-        titleSpacing: 12,
-        title: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // TouriLink ロゴ：10回連打で隠しデバッグメニュー解禁/無効を切替
-            GestureDetector(
-              behavior: HitTestBehavior.opaque,
-              onTap: _onLogoTapped,
-              child: Text('TouriLink',
-                  style: GoogleFonts.audiowide(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
-            ),
-            Text('ルーム: ${widget.roomCode} | ${_members.length}人が走行中',
-                style: const TextStyle(color: Colors.grey, fontSize: 12)),
-          ],
-        ),
-        actions: [
-          // 隠しデバッグメニュー（TouriLink ロゴ10回タップで解禁時のみ表示）
-          if (_debugLogEnabled)
-            IconButton(
-              tooltip: '逸脱判定ログ',
-              icon: const Icon(Icons.bug_report, color: Colors.purple),
-              onPressed: _showDebugLogDialog,
-            ),
-          // 位置共有スイッチ（GPSラベル付き）
-          Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                'GPS',
-                style: TextStyle(
-                  color: _shareLocation ? Colors.green : Colors.grey,
-                  fontSize: 12,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-              Switch(
-                value: _shareLocation,
-                activeThumbColor: Colors.green,
-                inactiveThumbColor: Colors.grey,
-                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                onChanged: (_) => _toggleLocationSharing(),
-              ),
-            ],
-          ),
-          PopupMenuButton<String>(
-            icon: const Icon(Icons.more_vert, color: Colors.white),
-            color: const Color(0xFF0D1B2A),
-            onSelected: (value) {
-              if (value == 'qr') _showQrDialog();
-              if (value == 'share') _shareRoomCode();
-            },
-            itemBuilder: (ctx) => [
-              const PopupMenuItem(
-                value: 'qr',
-                child: Row(children: [
-                  Icon(Icons.qr_code_rounded, color: Colors.white, size: 20),
-                  SizedBox(width: 10),
-                  Text('QRコードを表示', style: TextStyle(color: Colors.white)),
-                ]),
-              ),
-              const PopupMenuItem(
-                value: 'share',
-                child: Row(children: [
-                  Icon(Icons.share_rounded, color: Colors.white, size: 20),
-                  SizedBox(width: 10),
-                  Text('ルームを共有', style: TextStyle(color: Colors.white)),
-                ]),
-              ),
-            ],
-          ),
-          TextButton.icon(
-            icon: const Icon(Icons.exit_to_app, color: Colors.white, size: 18),
-            label: const Text('退出', style: TextStyle(color: Colors.white, fontSize: 13)),
-            onPressed: _exitToLogin,
-          ),
-        ],
-      ),
+      appBar: _buildPrimaryAppBar(),
       body: SafeArea(
         bottom: true,
         child: Column(
@@ -1879,65 +2061,37 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     );
   }
 
-  // 横向きレイアウト
+  // 横向きレイアウト（Phase A-2 で全面書き換え）
+  // 上部: 縦画面と共用ヘッダー / 左帯: アクションボタン縦並び / 中央〜右: マップ（A-1 と同じ吹き出し+メンバーリスト） / 下端: 広告
   Widget _buildLandscapeLayout() {
     return Scaffold(
       backgroundColor: const Color(0xFF0A1628),
+      appBar: _buildPrimaryAppBar(),
       body: SafeArea(
-        child: Row(
+        bottom: true,
+        child: Column(
           children: [
-            // 左: マップ（メイン）
+            if (_remainingTime.isNotEmpty) _buildTimerBanner(),
+            _buildRoutePreferenceToggle(),
             Expanded(
-              flex: 3,
-              child: Column(
+              child: Row(
                 children: [
-                  if (_remainingTime.isNotEmpty) _buildTimerBanner(),
-                  _buildRoutePreferenceToggle(),
+                  // 左帯: アクションボタン縦並び（width 60 + padding 4*2 + 余白 = 約76px）
+                  Container(
+                    width: 76,
+                    color: const Color(0xFF0D1B2A),
+                    child: SingleChildScrollView(
+                      child: _buildActionButtonsVertical(),
+                    ),
+                  ),
+                  // 中央〜右: マップ（縦画面と同じ吹き出し+メンバーリスト）
                   Expanded(child: _buildMap()),
                 ],
               ),
             ),
-            // 右: サイドパネル
-            Container(
-              width: 320,
-              color: const Color(0xFF0D1B2A),
-              child: Column(
-                children: [
-                  // ルーム情報 + 退出ボタン
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-                    color: const Color(0xFF0A1628),
-                    child: Row(
-                      children: [
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text('TouriLink',
-                                  style: GoogleFonts.audiowide(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold)),
-                              Text('${_members.length}人が走行中',
-                                  style: const TextStyle(color: Colors.grey, fontSize: 10)),
-                            ],
-                          ),
-                        ),
-                        GestureDetector(
-                          onTap: _exitToLogin,
-                          child: const Icon(Icons.exit_to_app, color: Colors.white54, size: 20),
-                        ),
-                      ],
-                    ),
-                  ),
-                  // メンバーリスト（縦向き）
-                  Expanded(
-                    child: _buildMemberListVertical(),
-                  ),
-                  // アクションボタン
-                  _buildActionButtons(),
-                  // 広告
-                  if (_isBannerAdLoaded) _buildAdBanner(),
-                ],
-              ),
-            ),
+            // 通知バナーは横画面でもマップ下に表示
+            if (_pendingNotifications.isNotEmpty) _buildNotificationBanners(),
+            if (_isBannerAdLoaded) _buildAdBanner(),
           ],
         ),
       ),
@@ -2037,12 +2191,23 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
             child: Center(
               child: GestureDetector(
                 onTap: () {
-                  setState(() => _isFollowingMember = false);
-                  _animateCamera(
-                    CameraUpdate.newLatLngZoom(_myPosition, 17.0),
-                    programmatic: true,
-                  );
+                  // Phase A-4: ナビ中はオフセット + tilt 60 維持で復帰、それ以外はズーム17の真俯瞰
+                  final isNavigating = !_isRoutePreview && _routes.isNotEmpty;
+                  setState(() {
+                    _isFollowingMember = false;
+                    _currentZoom = 17.0;
+                  });
+                  if (isNavigating) {
+                    _animateCameraWithBearing(_myPosition, _currentBearing);
+                  } else {
+                    _animateCamera(
+                      CameraUpdate.newLatLngZoom(_myPosition, 17.0),
+                      programmatic: true,
+                    );
+                  }
                 },
+                // Phase A-4: ダブルタップで全メンバーが画面に収まる範囲にズーム
+                onDoubleTap: _zoomToAllMembers,
                 child: Container(
                   padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
                   decoration: BoxDecoration(
@@ -2165,12 +2330,12 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
               ),
             ),
           ),
-        // プレビュー中: 画面右端に縦並びでルート選択吹き出しを表示。
+        // プレビュー中: 画面左端に縦並びでルート選択吹き出しを表示（Phase A-1 で右→左に移動）。
         // 各吹き出しの色は対応するルート色（赤/青/緑）と一致させる。
         // 選択中は白い太枠線で強調。タップで _selectRoute(i)。
         if (_isRoutePreview && _routes.isNotEmpty)
           Positioned(
-            right: 12,
+            left: 12,
             top: 0,
             bottom: 0,
             child: Center(
@@ -2220,6 +2385,12 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
               ),
             ),
           ),
+        // マップ右上にメンバーリスト縦並び（Phase A-1 で下部横スクロールから移動）
+        Positioned(
+          right: 6,
+          top: 6,
+          child: _buildMemberListOverlay(),
+        ),
       ],
     );
   }
@@ -2466,88 +2637,115 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
             _buildNotificationBanners(),
             const SizedBox(height: 4),
           ],
-          _buildMemberList(),
-          const SizedBox(height: 6),
           _buildActionButtons(),
         ],
       ),
     );
   }
 
-  // アクションボタン行（縦・横レイアウト共用）
+  // アクションボタン4つ（目的地/ルート共有/速度注意/通知）の Widget リストを返却。
+  // 縦並び（横画面・左帯）と横並び（縦画面・bottom）の両方で使う共通化ヘルパー（Phase A-2 で新設）。
+  List<Widget> _buildActionButtonItems(double btnWidth) {
+    return [
+      _buildActionBtn(
+        icon: _polylines.isNotEmpty ? Icons.stop : Icons.place,
+        label: _polylines.isNotEmpty ? '案内終了' : '目的地',
+        color: _polylines.isNotEmpty
+            ? Colors.redAccent
+            : _groupDestination != null
+                ? const Color(0xFF1E90FF)
+                : const Color(0xFF1A3A5C),
+        onTap: _polylines.isNotEmpty
+            ? () {
+                setState(() {
+                  _groupDestination = null;
+                  _groupDestName = '';
+                  _polylines = {};
+                  _routes = [];
+                  _selectedRouteIndex = 0;
+                  _headingUp = false;
+                  _isRoutePreview = false;
+                  _isShared = false;
+                });
+                _animateCameraWithBearing(_myPosition, 0);
+                _updateDestinationMarker();
+              }
+            : _setPersonalDestination,
+        width: btnWidth,
+      ),
+      // プレビュー中（3ルート表示中）は共有不可。「このルートで出発」でナビ確定後のみ有効
+      _buildActionBtn(
+        icon: Icons.share,
+        label: 'ルート共有',
+        color: (_groupDestination != null && !_isRoutePreview)
+            ? const Color(0xFF00D4FF)
+            : Colors.grey.shade800,
+        onTap: (_groupDestination != null && !_isRoutePreview)
+            ? _shareGroupDestination
+            : null,
+        width: btnWidth,
+      ),
+      _buildActionBtn(
+        icon: Icons.warning_amber_rounded,
+        label: '速度注意',
+        color: const Color(0xFFB71C1C),
+        onTap: () async {
+          await _addWarning(_myPosition);
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('！ 注意喚起を報告しました（30分間表示）'),
+                backgroundColor: Color(0xFF1A3A5C),
+              ),
+            );
+          }
+        },
+        width: btnWidth,
+      ),
+      _buildNotifyBtn(width: btnWidth),
+    ];
+  }
+
+  // 縦画面 bottom 用：横並び 4ボタン（既存のレイアウト維持）
   Widget _buildActionButtons() {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
       child: LayoutBuilder(
         builder: (context, constraints) {
-          const int buttonCount = 4; // 「現在地」は右下FAB（「ルート共有」はFB書き込み専用ボタンとして常設）
+          const int buttonCount = 4;
           const double spacing = 8.0;
           final double btnWidth =
               ((constraints.maxWidth - spacing * (buttonCount - 1)) / buttonCount)
                   .clamp(60.0, 100.0);
-
+          final items = _buildActionButtonItems(btnWidth);
           return Row(
             mainAxisAlignment: MainAxisAlignment.start,
             children: [
-              _buildActionBtn(
-                icon: _polylines.isNotEmpty ? Icons.stop : Icons.place,
-                label: _polylines.isNotEmpty ? '案内終了' : '目的地',
-                color: _polylines.isNotEmpty
-                    ? Colors.redAccent
-                    : _groupDestination != null
-                        ? const Color(0xFF1E90FF)
-                        : const Color(0xFF1A3A5C),
-                onTap: _polylines.isNotEmpty
-                    ? () {
-                        setState(() {
-                          _groupDestination = null;
-                          _groupDestName = '';
-                          _polylines = {};
-                          _routes = [];
-                          _selectedRouteIndex = 0;
-                          _headingUp = false;
-                          _isRoutePreview = false;
-                          _isShared = false;
-                        });
-                        _animateCameraWithBearing(_myPosition, 0);
-                        _updateDestinationMarker();
-                      }
-                    : _setPersonalDestination,
-                width: btnWidth,
-              ),
-              const SizedBox(width: spacing),
-              _buildActionBtn(
-                icon: Icons.share,
-                label: 'ルート共有',
-                color: _groupDestination != null
-                    ? const Color(0xFF00D4FF)
-                    : Colors.grey.shade800,
-                onTap: _groupDestination != null ? _shareGroupDestination : null,
-                width: btnWidth,
-              ),
-              const SizedBox(width: spacing),
-              _buildActionBtn(
-                icon: Icons.warning_amber_rounded,
-                label: '速度注意',
-                color: const Color(0xFFB71C1C),
-                onTap: () async {
-                  await _addWarning(_myPosition);
-                  if (mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(
-                        content: Text('！ 注意喚起を報告しました（30分間表示）'),
-                        backgroundColor: Color(0xFF1A3A5C),
-                      ),
-                    );
-                  }
-                },
-                width: btnWidth,
-              ),
-              const SizedBox(width: spacing),
-              _buildNotifyBtn(width: btnWidth),
+              for (int i = 0; i < items.length; i++) ...[
+                if (i > 0) const SizedBox(width: spacing),
+                items[i],
+              ],
             ],
           );
         },
+      ),
+    );
+  }
+
+  // 横画面 左帯用：縦並び 4ボタン（Phase A-2 で新設、width 60 固定）
+  Widget _buildActionButtonsVertical() {
+    const double spacing = 8.0;
+    final items = _buildActionButtonItems(60.0);
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          for (int i = 0; i < items.length; i++) ...[
+            if (i > 0) const SizedBox(height: spacing),
+            items[i],
+          ],
+        ],
       ),
     );
   }
@@ -2595,138 +2793,99 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     );
   }
 
-  // 横向き用: 縦スクロールのメンバーリスト
-  Widget _buildMemberListVertical() {
+  // マップ右上に重ねて表示する縦並びメンバーリスト（Phase A-1 で新設）。
+  // 縦・横レイアウト共用。max-height は画面高の 50% で SingleChildScrollView でラップ。
+  Widget _buildMemberListOverlay() {
     final uids = _members.keys.toList();
-    return ListView.builder(
-      padding: const EdgeInsets.symmetric(vertical: 4),
-      itemCount: uids.length,
-      itemBuilder: (context, index) {
-        final uid = uids[index];
-        final m = _members[uid] as Map;
-        if (m['lat'] == null || m['lng'] == null) return const SizedBox.shrink();
-        final nick = m['nickname'] as String? ?? '?';
-        final lat = (m['lat'] as num).toDouble();
-        final lng = (m['lng'] as num).toDouble();
-        final dist = _metersTo(LatLng(lat, lng), _myPosition) / 1000;
-        final isMe = uid == widget.userId;
-        final stale = !isMe && _isStale(m);
-        return Opacity(
-          opacity: stale ? 0.4 : 1.0,
-          child: ListTile(
-            dense: true,
-            leading: CircleAvatar(
-              radius: 16,
-              backgroundColor: isMe ? const Color(0xFF1E90FF) : const Color(0xFFFF6B35),
-              child: Text(
-                nick.isNotEmpty ? nick[0].toUpperCase() : '?',
-                style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold),
-              ),
-            ),
-            title: Text(nick, style: const TextStyle(color: Colors.white, fontSize: 12)),
-            subtitle: Text(
-              isMe
-                  ? '自分'
-                  : (stale ? _formatElapsed(m) : '${dist.toStringAsFixed(1)}km'),
-              style: TextStyle(
-                color: stale ? const Color(0xFFFFB74D) : Colors.grey[400],
-                fontSize: 10,
-              ),
-            ),
-            onTap: () {
-              setState(() => _isFollowingMember = true);
-              _mapController?.animateCamera(CameraUpdate.newLatLng(LatLng(lat, lng)));
-            },
-          ),
-        );
-      },
-    );
-  }
-
-  Widget _buildMemberList() {
-    final uids = _members.keys.toList();
-    return SizedBox(
-      height: 80,
-      child: ListView.builder(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(horizontal: 16),
-        itemCount: uids.length,
-        itemBuilder: (context, index) {
-          final uid = uids[index];
-          final m = _members[uid] as Map;
-          if (m['lat'] == null || m['lng'] == null) return const SizedBox.shrink();
-          final nick = m['nickname'] as String? ?? '?';
-          final lat = (m['lat'] as num).toDouble();
-          final lng = (m['lng'] as num).toDouble();
-          final dist = _metersTo(LatLng(lat, lng), _myPosition) / 1000;
-          final isMe = uid == widget.userId;
-          return Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 8),
-            child: GestureDetector(
-              onTap: () {
-                setState(() => _isFollowingMember = true);
-                _mapController?.animateCamera(
-                  CameraUpdate.newLatLng(LatLng(lat, lng)),
-                );
-              },
-              onLongPress: () {
-                final bearing = atan2(
-                  lng - _myPosition.longitude,
-                  lat - _myPosition.latitude,
-                ) * 180 / 3.141592653589793;
-                final dir = _bearingToDirection(bearing);
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(
-                    content: Text('$nickさんは${dist.toStringAsFixed(1)}km先の$dir方向'),
-                    duration: const Duration(seconds: 3),
-                  ),
-                );
-              },
-              child: Opacity(
-                opacity: (!isMe && _isStale(m)) ? 0.4 : 1.0,
-                child: Column(
-                  children: [
-                    CircleAvatar(
-                      radius: 20,
-                      backgroundColor: isMe ? const Color(0xFF1E90FF) : const Color(0xFFFF6B35),
-                      child: Text(
-                        nick.isNotEmpty ? nick[0].toUpperCase() : '?',
-                        style: const TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.bold),
+    return ConstrainedBox(
+      constraints: BoxConstraints(
+        maxHeight: MediaQuery.of(context).size.height * 0.5,
+      ),
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (int i = 0; i < uids.length; i++) ...[
+              if (i > 0) const SizedBox(height: 3),
+              Builder(
+                builder: (context) {
+                  final uid = uids[i];
+                  final m = _members[uid] as Map;
+                  if (m['lat'] == null || m['lng'] == null) {
+                    return const SizedBox.shrink();
+                  }
+                  final nick = m['nickname'] as String? ?? '?';
+                  final lat = (m['lat'] as num).toDouble();
+                  final lng = (m['lng'] as num).toDouble();
+                  final dist = _metersTo(LatLng(lat, lng), _myPosition) / 1000;
+                  final isMe = uid == widget.userId;
+                  final stale = !isMe && _isStale(m);
+                  // 名前は最大3文字、4文字以上は末尾省略
+                  final shortName = nick.length <= 3 ? nick : '${nick.substring(0, 3)}…';
+                  return GestureDetector(
+                    onTap: () {
+                      setState(() => _isFollowingMember = true);
+                      _mapController?.animateCamera(
+                        CameraUpdate.newLatLng(LatLng(lat, lng)),
+                      );
+                    },
+                    child: Opacity(
+                      opacity: stale ? 0.4 : 1.0,
+                      child: Container(
+                        constraints: const BoxConstraints(minWidth: 38),
+                        padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 3),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF0D1B2A).withValues(alpha: 0.85),
+                          border: Border.all(color: Colors.white, width: 1),
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            CircleAvatar(
+                              radius: 8,
+                              backgroundColor: isMe
+                                  ? const Color(0xFF1E90FF)
+                                  : const Color(0xFFFF6B35),
+                              child: Text(
+                                nick.isNotEmpty ? nick[0].toUpperCase() : '?',
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 8,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ),
+                            const SizedBox(height: 1),
+                            Text(
+                              shortName,
+                              maxLines: 1,
+                              overflow: TextOverflow.clip,
+                              style: const TextStyle(color: Colors.white, fontSize: 8),
+                            ),
+                            Text(
+                              isMe
+                                  ? '自分'
+                                  : (stale ? _formatElapsed(m) : '${dist.toStringAsFixed(1)}km'),
+                              maxLines: 1,
+                              overflow: TextOverflow.clip,
+                              style: TextStyle(
+                                color: stale ? const Color(0xFFFFB74D) : Colors.grey[400],
+                                fontSize: 7,
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
                     ),
-                    const SizedBox(height: 2),
-                    Text(nick, style: const TextStyle(color: Colors.white, fontSize: 11)),
-                    if (isMe)
-                      Text('自分', style: TextStyle(color: Colors.grey[400], fontSize: 10))
-                    else if (_isStale(m))
-                      Text(
-                        _formatElapsed(m),
-                        style: const TextStyle(color: Color(0xFFFFB74D), fontSize: 10),
-                      )
-                    else
-                      Text(
-                        '${dist.toStringAsFixed(1)}km',
-                        style: TextStyle(color: Colors.grey[400], fontSize: 10),
-                      ),
-                  ],
-                ),
+                  );
+                },
               ),
-            ),
-          );
-        },
+            ],
+          ],
+        ),
       ),
     );
-  }
-
-  String _bearingToDirection(double bearing) {
-    if (bearing < -157.5 || bearing >= 157.5) return '南';
-    if (bearing < -112.5) return '南西';
-    if (bearing < -67.5) return '西';
-    if (bearing < -22.5) return '北西';
-    if (bearing < 22.5) return '北';
-    if (bearing < 67.5) return '北東';
-    if (bearing < 112.5) return '東';
-    return '南東';
   }
 }
 
