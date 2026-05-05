@@ -1052,20 +1052,49 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
             final summary = (routesJson[i]['summary'] as String?) ?? '';
             final duration = (leg['duration']['text'] as String?) ?? '';
             final distance = (leg['distance']['text'] as String?) ?? '';
+            final durationSec = (leg['duration']['value'] as num?)?.toInt() ?? 0;
+            final distanceMet = (leg['distance']['value'] as num?)?.toInt() ?? 0;
             debugPrint('[Phase1]   [$i] summary="$summary" / $duration / $distance');
-            final steps = leg['steps'] as List;
-            final coords = <LatLng>[];
-            for (final step in steps) {
+            final stepsJson = leg['steps'] as List;
+            final stepsList = <_RouteStep>[];
+            for (final step in stepsJson) {
               final encoded = step['polyline']['points'] as String;
               final pts = PolylinePoints.decodePolyline(encoded);
-              coords.addAll(pts.map((p) => LatLng(p.latitude, p.longitude)));
+              final stepPoints = pts.map((p) => LatLng(p.latitude, p.longitude)).toList();
+              if (stepPoints.isEmpty) continue;
+              final htmlInst = (step['html_instructions'] as String?) ?? '';
+              final maneuver = step['maneuver'] as String?;
+              final stepDistText = (step['distance']?['text'] as String?) ?? '';
+              final stepDistVal = (step['distance']?['value'] as num?)?.toInt() ?? 0;
+              final stepDurVal = (step['duration']?['value'] as num?)?.toInt() ?? 0;
+              final startLoc = step['start_location'];
+              final endLoc = step['end_location'];
+              final start = startLoc != null
+                  ? LatLng((startLoc['lat'] as num).toDouble(), (startLoc['lng'] as num).toDouble())
+                  : stepPoints.first;
+              final end = endLoc != null
+                  ? LatLng((endLoc['lat'] as num).toDouble(), (endLoc['lng'] as num).toDouble())
+                  : stepPoints.last;
+              stepsList.add(_RouteStep(
+                points: stepPoints,
+                htmlInstructions: htmlInst,
+                plainInstructions: _stripHtmlTags(htmlInst),
+                maneuver: maneuver,
+                distanceMeters: stepDistVal,
+                durationSeconds: stepDurVal,
+                distanceText: stepDistText,
+                startLocation: start,
+                endLocation: end,
+              ));
             }
-            if (coords.isNotEmpty) {
+            if (stepsList.isNotEmpty) {
               newRoutes.add(_Route(
-                points: coords,
+                steps: stepsList,
                 summary: summary,
                 durationText: duration,
                 distanceText: distance,
+                durationSeconds: durationSec,
+                distanceMeters: distanceMet,
               ));
             }
           }
@@ -2891,14 +2920,60 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
 
 // Directions API から取得した 1 本のルート情報。複数ルート (alternatives=true) の保持に使用。
 class _Route {
-  final List<LatLng> points;
+  final List<_RouteStep> steps;
   final String summary;
   final String durationText;
   final String distanceText;
+  // leg['duration']['value'] / leg['distance']['value'] の数値版（B-4 到着予想カードで使用）
+  final int durationSeconds;
+  final int distanceMeters;
   const _Route({
-    required this.points,
+    required this.steps,
     required this.summary,
     required this.durationText,
     required this.distanceText,
+    required this.durationSeconds,
+    required this.distanceMeters,
   });
+
+  // 既存の _routePoints / passedRoute 計算用。steps の polyline を連結して返す。
+  List<LatLng> get points => [
+        for (final s in steps) ...s.points,
+      ];
+}
+
+// Directions API の step 単位の情報。B-2 の最近接点判定 / B-3 の案内バナーで使用。
+class _RouteStep {
+  final List<LatLng> points;          // この step の polyline 点列
+  final String htmlInstructions;       // 例: "<b>国道20号</b>を<b>甲府</b>方面へ進む"
+  final String plainInstructions;      // HTML タグ除去済み（バナー表示用）
+  final String? maneuver;              // 例: "turn-left" / "turn-right" / null=直進
+  final int distanceMeters;            // step['distance']['value']
+  final int durationSeconds;           // step['duration']['value']
+  final String distanceText;           // 例: "500 m"
+  final LatLng startLocation;          // step 開始座標
+  final LatLng endLocation;            // step 終了座標
+  const _RouteStep({
+    required this.points,
+    required this.htmlInstructions,
+    required this.plainInstructions,
+    required this.maneuver,
+    required this.distanceMeters,
+    required this.durationSeconds,
+    required this.distanceText,
+    required this.startLocation,
+    required this.endLocation,
+  });
+}
+
+// html_instructions から HTML タグを取り除く（<b>国道20号</b> → 国道20号）
+// Directions API の出力は単純なタグのみ含まれるので正規表現で十分。
+String _stripHtmlTags(String html) {
+  // <div> による改行ヒントは半角スペースに置換してから他タグ除去
+  return html
+      .replaceAll(RegExp(r'<div[^>]*>', caseSensitive: false), ' ')
+      .replaceAll(RegExp(r'<[^>]+>'), '')
+      .replaceAll('&nbsp;', ' ')
+      .replaceAll(RegExp(r'\s+'), ' ')
+      .trim();
 }
