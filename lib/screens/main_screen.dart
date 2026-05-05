@@ -39,7 +39,8 @@ class MainScreen extends StatefulWidget {
   State<MainScreen> createState() => _MainScreenState();
 }
 
-class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
+class _MainScreenState extends State<MainScreen>
+    with WidgetsBindingObserver, TickerProviderStateMixin {
   GoogleMapController? _mapController;
   bool _isFollowingMember = false;
   late bool _shareLocation;
@@ -49,7 +50,16 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   // この時間以内のonCameraMoveStartedはプログラム由来とみなす（ms）
   static const _programmaticMoveGuardMs = 100;
   Set<Marker> _markers = {};
+  // 生 GPS 値。ステップ判定 / 逸脱判定 / 距離計算など全ロジックで使用。
   LatLng _myPosition = const LatLng(35.6812, 139.7671);
+  // Phase B-5: 自車マーカーの表示位置（_myPosition への補間後）。
+  // 約 500ms tween でジャンプを滑らかに見せる。生ロジックには使わない。
+  LatLng _displayMyPosition = const LatLng(35.6812, 139.7671);
+  LatLng _animFrom = const LatLng(35.6812, 139.7671);
+  LatLng _animTo = const LatLng(35.6812, 139.7671);
+  AnimationController? _markerAnimController;
+  // 初回 GPS 取得済みフラグ。初回はデフォルト東京座標から現在地へ tween しないようスナップ。
+  bool _hasFirstFix = false;
   Timer? _expiryTimer;
   String _remainingTime = '';
   Timer? _countdownTimer;
@@ -138,6 +148,15 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   List<LatLng> get _routePoints =>
       _routes.isEmpty ? const [] : _routes[_selectedRouteIndex].points;
 
+  // Phase B-2: ステップ判定（投影方式 + 3秒デバウンス）
+  // ナビ中の現在 step。B-3 案内バナーが「次の曲がる場所まで N m」を出すために使用。
+  int _currentStepIndex = 0;
+  // 切替候補。位置更新ごとに最近接 step を計算し、現 step と異なれば候補にする。
+  int? _pendingStepIndex;
+  // 候補が初めて検出された時刻。経過 >= 3秒で切替確定（GPS ジッタ・分岐点の誤判定を吸収）。
+  DateTime? _pendingSince;
+  static const Duration _stepDebounceDuration = Duration(seconds: 3);
+
   // 車両マーカーキャッシュ（vehicleType-isMe → BitmapDescriptor）
   final Map<String, BitmapDescriptor> _markerCache = {};
 
@@ -185,8 +204,35 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     _shareLocation = false;
     WakelockPlus.enable();
+    // Phase B-5: 自車マーカー位置の補間用 AnimationController。
+    // GPS 受信ごとに duration 500ms で _animFrom → _animTo へ tween。
+    // listener 内で _displayMyPosition を更新し、_markers の自車だけ高速差替え。
+    _markerAnimController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 500),
+    )..addListener(_onMarkerAnimTick);
     _initAll();
     _loadBannerAd();
+  }
+
+  // Phase B-5: アニメーション tick ごとに自車マーカー位置を更新。
+  // フル _rebuildMarkers は呼ばず、Set 内の自車エントリだけ position を差し替える同期処理。
+  void _onMarkerAnimTick() {
+    if (!mounted) return;
+    final t = _markerAnimController?.value ?? 1.0;
+    final lat = _animFrom.latitude + (_animTo.latitude - _animFrom.latitude) * t;
+    final lng = _animFrom.longitude + (_animTo.longitude - _animFrom.longitude) * t;
+    _displayMyPosition = LatLng(lat, lng);
+    final myUid = widget.userId;
+    final updated = <Marker>{};
+    for (final m in _markers) {
+      if (m.markerId.value == myUid) {
+        updated.add(m.copyWith(positionParam: _displayMyPosition));
+      } else {
+        updated.add(m);
+      }
+    }
+    setState(() => _markers = updated);
   }
 
   @override
@@ -957,9 +1003,11 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       final isMe = uid == widget.userId;
       final icon = await _getVehicleMarker(vehicleType, isMe, nick);
       final stale = !isMe && _isStale(m);
+      // Phase B-5: 自車だけ補間後の表示位置を使う（ジャンプを tween で滑らかに見せる）
+      final pos = isMe ? _displayMyPosition : LatLng(lat, lng);
       newMarkers.add(Marker(
         markerId: MarkerId(uid),
-        position: LatLng(lat, lng),
+        position: pos,
         icon: icon,
         // Phase A-6: 画像 144x104 のうち円中心(72,32)を地点位置にアンカー
         // 32/104 ≈ 0.308。これでラベル分のズレを補正
@@ -1474,10 +1522,13 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   }
 
   LocationSettings _buildLocationSettings() {
+    // Phase B-5: ナビ最適化（高頻度・高精度。バッテリー消費は許容）
     if (Platform.isAndroid) {
       return AndroidSettings(
-        accuracy: LocationAccuracy.high,
-        intervalDuration: const Duration(seconds: 2),
+        accuracy: LocationAccuracy.bestForNavigation,
+        intervalDuration: const Duration(milliseconds: 500),
+        // ジッタ抑制のため最小移動量は控えめに（0 にすると静止時もイベントが連発する）
+        distanceFilter: 0,
         foregroundNotificationConfig: const ForegroundNotificationConfig(
           notificationText: 'バックグラウンドで位置情報を更新中',
           notificationTitle: 'TouriLink',
@@ -1486,16 +1537,17 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       );
     } else if (Platform.isIOS) {
       return AppleSettings(
-        accuracy: LocationAccuracy.high,
+        accuracy: LocationAccuracy.bestForNavigation,
         activityType: ActivityType.automotiveNavigation,
         pauseLocationUpdatesAutomatically: false,
         allowBackgroundLocationUpdates: true,
         showBackgroundLocationIndicator: true,
+        distanceFilter: 0,
       );
     }
     return const LocationSettings(
-      accuracy: LocationAccuracy.high,
-      distanceFilter: 5,
+      accuracy: LocationAccuracy.bestForNavigation,
+      distanceFilter: 0,
     );
   }
 
@@ -1504,7 +1556,20 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       locationSettings: _buildLocationSettings(),
     ).listen((pos) async {
       if (!mounted) return;
-      setState(() => _myPosition = LatLng(pos.latitude, pos.longitude));
+      final newPos = LatLng(pos.latitude, pos.longitude);
+      // Phase B-5: 自車マーカーの tween を駆動（生 _myPosition は別途 setState で更新）
+      // 初回はデフォルト東京座標から長距離 tween しないようスナップ。
+      if (!_hasFirstFix) {
+        _hasFirstFix = true;
+        _displayMyPosition = newPos;
+        _animFrom = newPos;
+        _animTo = newPos;
+      } else {
+        _animFrom = _displayMyPosition;
+        _animTo = newPos;
+        _markerAnimController?.forward(from: 0);
+      }
+      setState(() => _myPosition = newPos);
       final spd = pos.speed;
       // 負値（取得不可）は 0 扱い。bearing ガードの外で常に更新
       _currentSpeed = spd > 0 ? spd : 0.0;
@@ -1532,6 +1597,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       }
       _checkRouteDeviation();
       _updatePassedRoute();
+      _updateCurrentStep(); // B-2: ステップ判定（投影方式 + 3秒デバウンス）
     }, onError: (e) {
       debugPrint('位置情報ストリームエラー: $e');
     });
@@ -1553,7 +1619,19 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       }
       final pos = await Geolocator.getCurrentPosition();
       if (!mounted) return;
-      setState(() => _myPosition = LatLng(pos.latitude, pos.longitude));
+      final newPos = LatLng(pos.latitude, pos.longitude);
+      // Phase B-5: 単発取得でも first-fix なら表示位置をスナップしておく
+      if (!_hasFirstFix) {
+        _hasFirstFix = true;
+        _displayMyPosition = newPos;
+        _animFrom = newPos;
+        _animTo = newPos;
+      } else {
+        _animFrom = _displayMyPosition;
+        _animTo = newPos;
+        _markerAnimController?.forward(from: 0);
+      }
+      setState(() => _myPosition = newPos);
       if (_shareLocation) {
         await _db.child('rooms/${widget.roomCode}/members/${widget.userId}').update({
           'nickname': widget.nickname,
@@ -1652,6 +1730,69 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     return sqrt(pow(px - t * dx, 2) + pow(py - t * dy, 2));
   }
 
+  /// Phase B-2: ナビ中の現在 step を判定。投影方式（最近接セグメント）。
+  /// 全 step の polyline 線分への垂線距離が最小のものを採用。
+  /// step 数は通常 10〜30 程度なので O(N×M) 線形探索で問題無し。
+  int _findClosestStepIndex(LatLng pos, List<_RouteStep> steps) {
+    if (steps.isEmpty) return 0;
+    int bestStep = 0;
+    double bestDist = double.infinity;
+    for (int i = 0; i < steps.length; i++) {
+      final pts = steps[i].points;
+      if (pts.length < 2) continue;
+      for (int j = 0; j < pts.length - 1; j++) {
+        final d = _distanceToSegment(pos, pts[j], pts[j + 1]);
+        if (d < bestDist) {
+          bestDist = d;
+          bestStep = i;
+        }
+      }
+    }
+    return bestStep;
+  }
+
+  /// Phase B-2: 位置更新時に呼ぶ。最近接 step を求め、3秒間連続で同じ候補が
+  /// 出続けた場合のみ切替確定（GPS ジッタ・分岐点での誤判定を吸収）。
+  /// プレビュー中 / ルート無し時は state をリセット。setState はしない（B-3 で UI と連携時に対応）。
+  void _updateCurrentStep() {
+    if (_isRoutePreview || _routes.isEmpty) {
+      if (_currentStepIndex != 0 || _pendingStepIndex != null) {
+        _currentStepIndex = 0;
+        _pendingStepIndex = null;
+        _pendingSince = null;
+      }
+      return;
+    }
+    if (_selectedRouteIndex < 0 || _selectedRouteIndex >= _routes.length) return;
+    final steps = _routes[_selectedRouteIndex].steps;
+    if (steps.isEmpty) return;
+
+    final candidate = _findClosestStepIndex(_myPosition, steps);
+
+    if (candidate == _currentStepIndex) {
+      // 候補が現 step と同じ → debounce 状態をクリア
+      _pendingStepIndex = null;
+      _pendingSince = null;
+      return;
+    }
+
+    if (_pendingStepIndex != candidate) {
+      // 新しい候補出現
+      _pendingStepIndex = candidate;
+      _pendingSince = DateTime.now();
+      return;
+    }
+
+    // 同じ候補が継続 → 経過時間チェック
+    if (_pendingSince != null &&
+        DateTime.now().difference(_pendingSince!) >= _stepDebounceDuration) {
+      debugPrint('[B-2] step 切替: $_currentStepIndex → $candidate (debounce 3s 経過)');
+      _currentStepIndex = candidate;
+      _pendingStepIndex = null;
+      _pendingSince = null;
+    }
+  }
+
   /// 2点間の距離（メートル）
   double _metersTo(LatLng a, LatLng b) {
     const r = 6371000.0;
@@ -1662,6 +1803,87 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     final h = sinLat * sinLat +
         cos(a.latitude * pi / 180) * cos(b.latitude * pi / 180) * sinLng * sinLng;
     return r * 2 * atan2(sqrt(h), sqrt(1 - h));
+  }
+
+  /// Phase B-3: 現在位置から指定 step の終了地点までのルート沿い距離（メートル）。
+  /// 1) 現在位置を step polyline の最近接セグメントに投影
+  /// 2) 投影点から該当セグメント終端までの距離 + 以降のセグメント長を合算
+  double _distanceAlongStepToEnd(LatLng pos, _RouteStep step) {
+    final pts = step.points;
+    if (pts.length < 2) return 0;
+    int bestIdx = 0;
+    double bestPerp = double.infinity;
+    double bestT = 0;
+    final cosLat = cos(pos.latitude * pi / 180);
+    for (int i = 0; i < pts.length - 1; i++) {
+      final a = pts[i];
+      final b = pts[i + 1];
+      final px = (pos.longitude - a.longitude) * cosLat * 111320;
+      final py = (pos.latitude  - a.latitude)           * 111320;
+      final dx = (b.longitude - a.longitude) * cosLat * 111320;
+      final dy = (b.latitude  - a.latitude)           * 111320;
+      final lenSq = dx * dx + dy * dy;
+      if (lenSq == 0) continue;
+      final t = ((px * dx + py * dy) / lenSq).clamp(0.0, 1.0);
+      final perp = sqrt(pow(px - t * dx, 2) + pow(py - t * dy, 2));
+      if (perp < bestPerp) {
+        bestPerp = perp;
+        bestIdx = i;
+        bestT = t;
+      }
+    }
+    // 最近接セグメント上で投影点から終端までの距離
+    double remaining = _metersTo(pts[bestIdx], pts[bestIdx + 1]) * (1.0 - bestT);
+    // 以降のセグメント長を加算
+    for (int i = bestIdx + 1; i < pts.length - 1; i++) {
+      remaining += _metersTo(pts[i], pts[i + 1]);
+    }
+    return remaining;
+  }
+
+  /// Phase B-3: maneuver 文字列から表示アイコンへ変換。null は直進アイコン。
+  IconData _maneuverToIcon(String? maneuver) {
+    switch (maneuver) {
+      case 'turn-left':
+      case 'turn-slight-left':
+      case 'turn-sharp-left':
+        return Icons.turn_left;
+      case 'turn-right':
+      case 'turn-slight-right':
+      case 'turn-sharp-right':
+        return Icons.turn_right;
+      case 'uturn-left':
+        return Icons.u_turn_left;
+      case 'uturn-right':
+        return Icons.u_turn_right;
+      case 'keep-left':
+      case 'fork-left':
+      case 'ramp-left':
+        return Icons.turn_slight_left;
+      case 'keep-right':
+      case 'fork-right':
+      case 'ramp-right':
+        return Icons.turn_slight_right;
+      case 'merge':
+        return Icons.merge;
+      case 'roundabout-left':
+        return Icons.roundabout_left;
+      case 'roundabout-right':
+        return Icons.roundabout_right;
+      default:
+        return Icons.straight;
+    }
+  }
+
+  /// Phase B-3: ナビ距離の表示形式（"500m先" / "1.2km先" / "まもなく"）
+  String _formatNavDistance(double meters) {
+    if (meters < 50) return 'まもなく';
+    if (meters < 1000) {
+      final rounded = (meters / 10).round() * 10;
+      return '${rounded}m先';
+    }
+    final km = (meters / 100).round() / 10.0;
+    return '${km.toStringAsFixed(1)}km先';
   }
 
   void _animateCamera(CameraUpdate update, {required bool programmatic}) {
@@ -1893,6 +2115,8 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     for (final t in _notificationRetryTimers.values) { t.cancel(); }
     _appLinkSubscription?.cancel();
     WidgetsBinding.instance.removeObserver(this);
+    _markerAnimController?.removeListener(_onMarkerAnimTick);
+    _markerAnimController?.dispose();
     _db.child('rooms/${widget.roomCode}/members/${widget.userId}').remove();
     _bannerAd?.dispose();
     super.dispose();
@@ -2426,6 +2650,14 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
           top: 6,
           child: _buildMemberListOverlay(),
         ),
+        // Phase B-3: 上部案内バナー（ナビ中のみ表示）。メンバーリストを避けるため右マージン70px。
+        if (!_isRoutePreview && _routes.isNotEmpty)
+          Positioned(
+            top: 8,
+            left: 8,
+            right: 70,
+            child: _buildNavigationBanner(),
+          ),
       ],
     );
   }
@@ -2516,6 +2748,10 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       _inRouteOverview = false;
       _currentZoom = 17.0;
     });
+    // B-2: ナビ開始時に step 判定 state をリセット（前回のナビの残骸を持ち越さない）
+    _currentStepIndex = 0;
+    _pendingStepIndex = null;
+    _pendingSince = null;
     // プレビュー（3色） → ナビ（選択ルートのみオレンジ）に切替
     _rebuildPolylines();
     _routeOverviewTimer?.cancel();
@@ -2830,6 +3066,96 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
 
   // マップ右上に重ねて表示する縦並びメンバーリスト（Phase A-1 で新設）。
   // 縦・横レイアウト共用。max-height は画面高の 50% で SingleChildScrollView でラップ。
+  /// Phase B-3: 上部案内バナー（Apple マップ風）。ナビ中（!preview && _routes.isNotEmpty）のみ表示。
+  /// 表示する maneuver は「次の step」のもの（= 現 step の終了地点で行う動作）。
+  /// 末尾 step に到達した場合は「目的地に到着」表示。
+  Widget _buildNavigationBanner() {
+    if (_isRoutePreview || _routes.isEmpty) return const SizedBox.shrink();
+    if (_selectedRouteIndex < 0 || _selectedRouteIndex >= _routes.length) {
+      return const SizedBox.shrink();
+    }
+    final steps = _routes[_selectedRouteIndex].steps;
+    if (steps.isEmpty) return const SizedBox.shrink();
+
+    final i = _currentStepIndex.clamp(0, steps.length - 1);
+    final isLastStep = i >= steps.length - 1;
+
+    // 表示用の指示 step / アイコン / テキスト
+    final IconData icon;
+    final String distanceText;
+    final String instructionText;
+    if (isLastStep) {
+      // 末尾 step → 目的地到着案内
+      final endDist = _distanceAlongStepToEnd(_myPosition, steps[i]);
+      icon = Icons.flag;
+      distanceText = _formatNavDistance(endDist);
+      instructionText = '目的地に到着';
+    } else {
+      final next = steps[i + 1];
+      icon = _maneuverToIcon(next.maneuver);
+      final distToTurn = _distanceAlongStepToEnd(_myPosition, steps[i]);
+      distanceText = _formatNavDistance(distToTurn);
+      instructionText = next.plainInstructions.isNotEmpty
+          ? next.plainInstructions
+          : '次の指示';
+    }
+
+    return Material(
+      color: Colors.transparent,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        decoration: BoxDecoration(
+          color: const Color(0xFF0D1B2A).withValues(alpha: 0.92),
+          borderRadius: BorderRadius.circular(12),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.4),
+              blurRadius: 8,
+              offset: const Offset(0, 2),
+            ),
+          ],
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 56,
+              height: 56,
+              decoration: const BoxDecoration(
+                color: Color(0xFF00D4FF),
+                shape: BoxShape.circle,
+              ),
+              child: Icon(icon, color: Colors.black, size: 36),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    distanceText,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 22,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    instructionText,
+                    style: const TextStyle(color: Colors.white70, fontSize: 13),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildMemberListOverlay() {
     final uids = _members.keys.toList();
     return ConstrainedBox(
