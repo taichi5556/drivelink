@@ -838,45 +838,101 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     return _warningMarkerCache!;
   }
 
-  Future<BitmapDescriptor> _getVehicleMarker(String vehicleType, bool isMe) async {
-    final key = '$vehicleType-$isMe';
+  // Phase A-6: 車両アイコンに名前ラベルを焼き込み。
+  // Canvas 144x104（円64x64 + ラベル領域 144x40）。円は Canvas 横幅の中央上に配置、
+  // ラベルは Canvas 横幅をフル活用して 5文字+省略（「タロウ太…」等）が確実に収まるサイズ。
+  // ニックネームは最大4文字、5文字以上は末尾「…」省略。空文字時はラベル無し（透過）。
+  // Marker 側で anchor=(0.5, 0.308) を指定して円中心(72,32)が地点位置に来るようにする。
+  Future<BitmapDescriptor> _getVehicleMarker(String vehicleType, bool isMe, String nickname) async {
+    final key = '$vehicleType-$isMe-$nickname';
     if (_markerCache.containsKey(key)) return _markerCache[key]!;
 
     final emoji = vehicleType == 'bike' ? '🏍' : '🚗';
     final bgColor = isMe ? const Color(0xFF1E90FF) : const Color(0xFFFF6B35);
-    // 高解像度で描画して imagePixelRatio で縮小表示（約20dp）
-    const size = 52.0;
+    const double iconSize = 64.0;             // 円直径
+    const double canvasWidth = 144.0;         // Canvas 横幅（ラベル収納用）
+    const double labelHeight = 40.0;
+    const double canvasHeight = iconSize + labelHeight; // 104
+    const double circleCx = canvasWidth / 2;  // 72
+    const double circleCy = iconSize / 2;     // 32
+    const double circleR = iconSize / 2 - 1;  // 31
 
     final recorder = ui.PictureRecorder();
     final canvas = Canvas(recorder);
 
-    // 背景円
+    // ── 上半分：円アイコン（Canvas 中央上に配置）──
     canvas.drawCircle(
-      const Offset(size / 2, size / 2),
-      size / 2 - 1,
+      const Offset(circleCx, circleCy),
+      circleR,
       Paint()..color = bgColor,
     );
     // 白枠
     canvas.drawCircle(
-      const Offset(size / 2, size / 2),
-      size / 2 - 1,
+      const Offset(circleCx, circleCy),
+      circleR,
       Paint()
         ..color = Colors.white
         ..style = PaintingStyle.stroke
         ..strokeWidth = 2,
     );
-
     // 絵文字
     final tp = TextPainter(textDirection: TextDirection.ltr)
-      ..text = TextSpan(text: emoji, style: const TextStyle(fontSize: 22))
+      ..text = TextSpan(text: emoji, style: const TextStyle(fontSize: 28))
       ..layout();
-    tp.paint(canvas, Offset((size - tp.width) / 2, (size - tp.height) / 2));
+    tp.paint(canvas, Offset(circleCx - tp.width / 2, circleCy - tp.height / 2));
+
+    // ── 下半分：名前ラベル（空文字時はスキップ）──
+    if (nickname.isNotEmpty) {
+      final shortName = nickname.length <= 4
+          ? nickname
+          : '${nickname.substring(0, 4)}…';
+
+      const double labelLeft = 4.0;
+      const double labelRight = canvasWidth - 4;        // 140
+      const double labelTop = iconSize + 2;              // 66
+      const double labelBottom = canvasHeight - 2;       // 102
+      final labelRect = RRect.fromLTRBR(
+        labelLeft, labelTop, labelRight, labelBottom,
+        const Radius.circular(4),
+      );
+      // 白背景
+      canvas.drawRRect(labelRect, Paint()..color = Colors.white);
+      // 細い黒枠（マップ背景に対する視認性確保）
+      canvas.drawRRect(
+        labelRect,
+        Paint()
+          ..color = Colors.black
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 0.5,
+      );
+      // 黒テキスト中央寄せ
+      final labelTp = TextPainter(
+        textDirection: TextDirection.ltr,
+        textAlign: TextAlign.center,
+      )
+        ..text = TextSpan(
+          text: shortName,
+          style: const TextStyle(
+            fontSize: 26,
+            color: Colors.black,
+            fontWeight: FontWeight.bold,
+          ),
+        )
+        ..layout(maxWidth: labelRight - labelLeft);
+      labelTp.paint(
+        canvas,
+        Offset(
+          (canvasWidth - labelTp.width) / 2,
+          labelTop + (labelBottom - labelTop - labelTp.height) / 2,
+        ),
+      );
+    }
 
     final picture = recorder.endRecording();
-    final image = await picture.toImage(size.toInt(), size.toInt());
+    final image = await picture.toImage(canvasWidth.toInt(), canvasHeight.toInt());
     final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
     if (bytes == null) return BitmapDescriptor.defaultMarker;
-    // imagePixelRatio: 2.5 → 画面上の表示サイズ = 52 / 2.5 ≈ 20dp
+    // imagePixelRatio: 2.5 → 画面上の表示サイズ = 64 / 2.5 ≈ 25.6dp（円部分）
     final descriptor = BitmapDescriptor.bytes(
       bytes.buffer.asUint8List(),
       imagePixelRatio: 2.5,
@@ -899,12 +955,15 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       final nick = m['nickname'] as String? ?? '';
       final vehicleType = m['vehicle_type'] as String? ?? 'car';
       final isMe = uid == widget.userId;
-      final icon = await _getVehicleMarker(vehicleType, isMe);
+      final icon = await _getVehicleMarker(vehicleType, isMe, nick);
       final stale = !isMe && _isStale(m);
       newMarkers.add(Marker(
         markerId: MarkerId(uid),
         position: LatLng(lat, lng),
         icon: icon,
+        // Phase A-6: 画像 144x104 のうち円中心(72,32)を地点位置にアンカー
+        // 32/104 ≈ 0.308。これでラベル分のズレを補正
+        anchor: const Offset(0.5, 0.308),
         alpha: stale ? 0.35 : 1.0,
         infoWindow: InfoWindow(title: nick),
       ));
