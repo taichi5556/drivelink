@@ -6,6 +6,7 @@ import 'package:firebase_database/firebase_database.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:share_plus/share_plus.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'main_screen.dart';
 import 'package:app_links/app_links.dart';
 import 'dart:async';
@@ -906,6 +907,30 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
                 ]),
               ),
             ],
+            const SizedBox(height: 12),
+            // プライバシーポリシーへのリンク（A-5: Android クローズドテスト審査要件）
+            Center(
+              child: GestureDetector(
+                onTap: () async {
+                  final uri = Uri.parse('https://taichi5556.github.io/drivelink/privacy_policy.html');
+                  final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
+                  if (!ok && context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('ブラウザを起動できませんでした')),
+                    );
+                  }
+                },
+                child: Text(
+                  _isJapanese ? 'プライバシーポリシー' : 'Privacy Policy',
+                  style: const TextStyle(
+                    color: Color(0xFF6680AA),
+                    fontSize: 12,
+                    decoration: TextDecoration.underline,
+                    decorationColor: Color(0xFF6680AA),
+                  ),
+                ),
+              ),
+            ),
             const SizedBox(height: 20),
           ]),
         )),

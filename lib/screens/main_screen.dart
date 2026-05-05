@@ -20,6 +20,7 @@ import 'package:app_links/app_links.dart';
 import 'package:flutter_polyline_points/flutter_polyline_points.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:qr_flutter/qr_flutter.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 class MainScreen extends StatefulWidget {
   final String userId;
@@ -1932,9 +1933,18 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
         PopupMenuButton<String>(
           icon: const Icon(Icons.more_vert, color: Colors.white),
           color: const Color(0xFF0D1B2A),
-          onSelected: (value) {
+          onSelected: (value) async {
             if (value == 'qr') _showQrDialog();
             if (value == 'share') _shareRoomCode();
+            if (value == 'privacy') {
+              final uri = Uri.parse('https://taichi5556.github.io/drivelink/privacy_policy.html');
+              final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
+              if (!ok && mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('ブラウザを起動できませんでした')),
+                );
+              }
+            }
           },
           itemBuilder: (ctx) => [
             const PopupMenuItem(
@@ -1951,6 +1961,14 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                 Icon(Icons.share_rounded, color: Colors.white, size: 20),
                 SizedBox(width: 10),
                 Text('ルームを共有', style: TextStyle(color: Colors.white)),
+              ]),
+            ),
+            const PopupMenuItem(
+              value: 'privacy',
+              child: Row(children: [
+                Icon(Icons.privacy_tip_outlined, color: Colors.white, size: 20),
+                SizedBox(width: 10),
+                Text('プライバシーポリシー', style: TextStyle(color: Colors.white)),
               ]),
             ),
           ],
