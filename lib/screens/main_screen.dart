@@ -157,6 +157,14 @@ class _MainScreenState extends State<MainScreen>
   DateTime? _pendingSince;
   static const Duration _stepDebounceDuration = Duration(seconds: 3);
 
+  // Phase B-6: 逆走検知 → 自動再検索
+  // 速度 >= 18km/h かつ 走行方向と進路方向の角度差 >= 135° が連続3秒で確定 → _fetchRoute(reroute) 発火。
+  // 多重発火防止は逸脱判定と同じ _rerouteInFlight / _lastRerouteTime（_rerouteCooldownSecs=20s）を共用。
+  static const double _reverseSpeedThresholdMps = 5.0; // 18km/h
+  static const double _reverseAngleThresholdDeg = 135.0;
+  static const Duration _reverseDebounceDuration = Duration(seconds: 3);
+  DateTime? _reverseSince;
+
   // 車両マーカーキャッシュ（vehicleType-isMe → BitmapDescriptor）
   final Map<String, BitmapDescriptor> _markerCache = {};
 
@@ -1598,6 +1606,7 @@ class _MainScreenState extends State<MainScreen>
       _checkRouteDeviation();
       _updatePassedRoute();
       _updateCurrentStep(); // B-2: ステップ判定（投影方式 + 3秒デバウンス）
+      _updateReverseDetection(); // B-6: 逆走検知（_currentStepIndex を使うため後）
     }, onError: (e) {
       debugPrint('位置情報ストリームエラー: $e');
     });
@@ -1793,6 +1802,96 @@ class _MainScreenState extends State<MainScreen>
     }
   }
 
+  /// Phase B-6: 逆走検知 → 自動再検索。GPS 更新ごとに呼ぶ。
+  /// 速度 >= _reverseSpeedThresholdMps かつ 走行方向と進路方向の角度差 >= _reverseAngleThresholdDeg
+  /// が _reverseDebounceDuration（3秒）連続で _fetchRoute(isRerouting: true) を発火。
+  /// 多重発火防止は逸脱判定と同じ _rerouteInFlight / _lastRerouteTime（cooldown 20秒）を共用。
+  void _updateReverseDetection() {
+    if (_isRoutePreview || _routes.isEmpty || _groupDestination == null) {
+      _reverseSince = null;
+      return;
+    }
+    if (_selectedRouteIndex < 0 || _selectedRouteIndex >= _routes.length) {
+      _reverseSince = null;
+      return;
+    }
+    // 再検索 in-flight / cooldown 中はループ防止のためスキップ（逸脱判定と共用）
+    if (_rerouteInFlight) {
+      _reverseSince = null;
+      return;
+    }
+    final now = DateTime.now();
+    if (_lastRerouteTime != null &&
+        now.difference(_lastRerouteTime!).inSeconds < _rerouteCooldownSecs) {
+      _reverseSince = null;
+      return;
+    }
+    final steps = _routes[_selectedRouteIndex].steps;
+    if (steps.isEmpty) {
+      _reverseSince = null;
+      return;
+    }
+    final i = _currentStepIndex.clamp(0, steps.length - 1);
+    final routeBearing = _routeBearingAtPosition(_myPosition, steps[i]);
+    if (routeBearing == null) {
+      _reverseSince = null;
+      return;
+    }
+
+    final diff = _angleDiff(_currentBearing, routeBearing);
+    final speedOk = _currentSpeed >= _reverseSpeedThresholdMps;
+    final angleOk = diff >= _reverseAngleThresholdDeg;
+
+    if (!(speedOk && angleOk)) {
+      _reverseSince = null;
+      return;
+    }
+
+    _reverseSince ??= now;
+    if (now.difference(_reverseSince!) >= _reverseDebounceDuration) {
+      _appendDebugLog(
+        '[B-6] 逆走確定 → 再検索 diff=${diff.toStringAsFixed(0)}° 速度=${(_currentSpeed * 3.6).toStringAsFixed(1)}km/h',
+      );
+      _reverseSince = null;
+      _fetchRoute(_groupDestination!, isRerouting: true);
+    }
+  }
+
+  /// Phase B-6: 指定 step 上で現在位置に最も近いセグメントの方位（度、0=北、東回り正）を返す。
+  /// step.points が 2点未満なら null。
+  double? _routeBearingAtPosition(LatLng pos, _RouteStep step) {
+    final pts = step.points;
+    if (pts.length < 2) return null;
+    int bestIdx = 0;
+    double bestDist = double.infinity;
+    for (int i = 0; i < pts.length - 1; i++) {
+      final d = _distanceToSegment(pos, pts[i], pts[i + 1]);
+      if (d < bestDist) {
+        bestDist = d;
+        bestIdx = i;
+      }
+    }
+    return _bearingBetween(pts[bestIdx], pts[bestIdx + 1]);
+  }
+
+  /// 2点間の方位（度、0=北、東回り正、[0, 360)）
+  double _bearingBetween(LatLng a, LatLng b) {
+    final lat1 = a.latitude * pi / 180;
+    final lat2 = b.latitude * pi / 180;
+    final dLng = (b.longitude - a.longitude) * pi / 180;
+    final y = sin(dLng) * cos(lat2);
+    final x = cos(lat1) * sin(lat2) - sin(lat1) * cos(lat2) * cos(dLng);
+    final bearing = atan2(y, x) * 180 / pi;
+    return (bearing + 360) % 360;
+  }
+
+  /// 2方位の差を [0, 180] に正規化
+  double _angleDiff(double a, double b) {
+    double d = (a - b).abs() % 360;
+    if (d > 180) d = 360 - d;
+    return d;
+  }
+
   /// 2点間の距離（メートル）
   double _metersTo(LatLng a, LatLng b) {
     const r = 6371000.0;
@@ -1839,6 +1938,70 @@ class _MainScreenState extends State<MainScreen>
       remaining += _metersTo(pts[i], pts[i + 1]);
     }
     return remaining;
+  }
+
+  /// Phase B-4: ルート全体の残り距離（メートル）。
+  /// 現在 step の残量（_distanceAlongStepToEnd）+ 以降の step.distanceMeters 合計。
+  double _remainingDistanceMeters() {
+    if (_routes.isEmpty) return 0;
+    if (_selectedRouteIndex < 0 || _selectedRouteIndex >= _routes.length) return 0;
+    final steps = _routes[_selectedRouteIndex].steps;
+    if (steps.isEmpty) return 0;
+    final i = _currentStepIndex.clamp(0, steps.length - 1);
+    double rem = _distanceAlongStepToEnd(_myPosition, steps[i]);
+    for (int k = i + 1; k < steps.length; k++) {
+      rem += steps[k].distanceMeters.toDouble();
+    }
+    return rem;
+  }
+
+  /// Phase B-4: ルート全体の残り時間（秒）。
+  /// 現在 step は残量比例で按分、以降は durationSeconds 合計。
+  int _remainingDurationSeconds() {
+    if (_routes.isEmpty) return 0;
+    if (_selectedRouteIndex < 0 || _selectedRouteIndex >= _routes.length) return 0;
+    final steps = _routes[_selectedRouteIndex].steps;
+    if (steps.isEmpty) return 0;
+    final i = _currentStepIndex.clamp(0, steps.length - 1);
+    final cur = steps[i];
+    final curRem = _distanceAlongStepToEnd(_myPosition, cur);
+    final curTotal = cur.distanceMeters;
+    double sec = curTotal > 0
+        ? cur.durationSeconds * (curRem / curTotal)
+        : cur.durationSeconds.toDouble();
+    for (int k = i + 1; k < steps.length; k++) {
+      sec += steps[k].durationSeconds.toDouble();
+    }
+    return sec.round();
+  }
+
+  /// Phase B-4: 「HH:mm 着」形式の到着予想時刻
+  String _formatEta(int remainingSec) {
+    final eta = DateTime.now().add(Duration(seconds: remainingSec));
+    final h = eta.hour.toString().padLeft(2, '0');
+    final m = eta.minute.toString().padLeft(2, '0');
+    return '$h:$m 着';
+  }
+
+  /// Phase B-4: 残り時間表示（"25分" / "1時間20分"）
+  String _formatRemainingDuration(int sec) {
+    if (sec < 60) return '1分未満';
+    final totalMin = (sec / 60).round();
+    if (totalMin < 60) return '$totalMin分';
+    final h = totalMin ~/ 60;
+    final m = totalMin % 60;
+    if (m == 0) return '$h時間';
+    return '$h時間$m分';
+  }
+
+  /// Phase B-4: 残り距離表示（"850m" / "12.3km"）
+  String _formatRemainingDistance(double meters) {
+    if (meters < 1000) {
+      final rounded = (meters / 10).round() * 10;
+      return '${rounded}m';
+    }
+    final km = (meters / 100).round() / 10.0;
+    return '${km.toStringAsFixed(1)}km';
   }
 
   /// Phase B-3: maneuver 文字列から表示アイコンへ変換。null は直進アイコン。
@@ -2658,6 +2821,14 @@ class _MainScreenState extends State<MainScreen>
             right: 70,
             child: _buildNavigationBanner(),
           ),
+        // Phase B-4: 下部到着予想カード（ナビ中のみ表示）。bottom-anchored。
+        if (!_isRoutePreview && _routes.isNotEmpty)
+          Positioned(
+            bottom: 8,
+            left: 8,
+            right: 8,
+            child: _buildArrivalCard(),
+          ),
       ],
     );
   }
@@ -3149,6 +3320,69 @@ class _MainScreenState extends State<MainScreen>
                   ),
                 ],
               ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Phase B-4: 下部到着予想カード。ナビ中（!preview && _routes.isNotEmpty）のみ表示。
+  /// 1行目：📍 + 目的地名（ellipsis）
+  /// 2行目：到着時刻 • あと残り時間 • 残り距離
+  Widget _buildArrivalCard() {
+    if (_isRoutePreview || _routes.isEmpty) return const SizedBox.shrink();
+    if (_selectedRouteIndex < 0 || _selectedRouteIndex >= _routes.length) {
+      return const SizedBox.shrink();
+    }
+    final remDist = _remainingDistanceMeters();
+    final remDur = _remainingDurationSeconds();
+    final eta = _formatEta(remDur);
+    final dur = _formatRemainingDuration(remDur);
+    final dist = _formatRemainingDistance(remDist);
+    final destName = _groupDestName.isEmpty ? '目的地' : _groupDestName;
+
+    return Material(
+      color: Colors.transparent,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        decoration: BoxDecoration(
+          color: const Color(0xFF0D1B2A).withValues(alpha: 0.92),
+          borderRadius: BorderRadius.circular(12),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.4),
+              blurRadius: 8,
+              offset: const Offset(0, 2),
+            ),
+          ],
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.place, color: Color(0xFF00D4FF), size: 18),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    destName,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 15,
+                      fontWeight: FontWeight.bold,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Text(
+              '$eta  •  あと$dur  •  $dist',
+              style: const TextStyle(color: Colors.white70, fontSize: 13),
             ),
           ],
         ),
