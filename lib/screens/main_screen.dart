@@ -1319,11 +1319,9 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       );
       return;
     }
-    // プレビュー中に直接「ルート共有」を押した場合はナビも同時に開始する
-    // （ローカル確定済みの場合は _isRoutePreview=false なので何もしない）
-    if (_isRoutePreview) {
-      _startNavigation();
-    }
+    // Phase A-3: プレビュー中の暗黙ナビ開始を撤廃。
+    // _buildActionButtonItems 側で _isRoutePreview=true 中はボタン非活性化済みのため、
+    // ここに到達するのは「このルートで出発」確定後（_isRoutePreview=false）のみ。
     final dest = _activeDestination!;
     final name = _activeDestName;
     await _db.child('rooms/${widget.roomCode}/destination').set({
@@ -2479,13 +2477,16 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
             : _setPersonalDestination,
         width: btnWidth,
       ),
+      // プレビュー中（3ルート表示中）は共有不可。「このルートで出発」でナビ確定後のみ有効
       _buildActionBtn(
         icon: Icons.share,
         label: 'ルート共有',
-        color: _groupDestination != null
+        color: (_groupDestination != null && !_isRoutePreview)
             ? const Color(0xFF00D4FF)
             : Colors.grey.shade800,
-        onTap: _groupDestination != null ? _shareGroupDestination : null,
+        onTap: (_groupDestination != null && !_isRoutePreview)
+            ? _shareGroupDestination
+            : null,
         width: btnWidth,
       ),
       _buildActionBtn(
