@@ -2165,12 +2165,12 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
               ),
             ),
           ),
-        // プレビュー中: 画面右端に縦並びでルート選択吹き出しを表示。
+        // プレビュー中: 画面左端に縦並びでルート選択吹き出しを表示（Phase A-1 で右→左に移動）。
         // 各吹き出しの色は対応するルート色（赤/青/緑）と一致させる。
         // 選択中は白い太枠線で強調。タップで _selectRoute(i)。
         if (_isRoutePreview && _routes.isNotEmpty)
           Positioned(
-            right: 12,
+            left: 12,
             top: 0,
             bottom: 0,
             child: Center(
@@ -2220,6 +2220,12 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
               ),
             ),
           ),
+        // マップ右上にメンバーリスト縦並び（Phase A-1 で下部横スクロールから移動）
+        Positioned(
+          right: 6,
+          top: 6,
+          child: _buildMemberListOverlay(),
+        ),
       ],
     );
   }
@@ -2466,8 +2472,6 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
             _buildNotificationBanners(),
             const SizedBox(height: 4),
           ],
-          _buildMemberList(),
-          const SizedBox(height: 6),
           _buildActionButtons(),
         ],
       ),
@@ -2643,90 +2647,99 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     );
   }
 
-  Widget _buildMemberList() {
+  // マップ右上に重ねて表示する縦並びメンバーリスト（Phase A-1 で新設）。
+  // 縦・横レイアウト共用。max-height は画面高の 50% で SingleChildScrollView でラップ。
+  Widget _buildMemberListOverlay() {
     final uids = _members.keys.toList();
-    return SizedBox(
-      height: 80,
-      child: ListView.builder(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(horizontal: 16),
-        itemCount: uids.length,
-        itemBuilder: (context, index) {
-          final uid = uids[index];
-          final m = _members[uid] as Map;
-          if (m['lat'] == null || m['lng'] == null) return const SizedBox.shrink();
-          final nick = m['nickname'] as String? ?? '?';
-          final lat = (m['lat'] as num).toDouble();
-          final lng = (m['lng'] as num).toDouble();
-          final dist = _metersTo(LatLng(lat, lng), _myPosition) / 1000;
-          final isMe = uid == widget.userId;
-          return Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 8),
-            child: GestureDetector(
-              onTap: () {
-                setState(() => _isFollowingMember = true);
-                _mapController?.animateCamera(
-                  CameraUpdate.newLatLng(LatLng(lat, lng)),
-                );
-              },
-              onLongPress: () {
-                final bearing = atan2(
-                  lng - _myPosition.longitude,
-                  lat - _myPosition.latitude,
-                ) * 180 / 3.141592653589793;
-                final dir = _bearingToDirection(bearing);
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(
-                    content: Text('$nickさんは${dist.toStringAsFixed(1)}km先の$dir方向'),
-                    duration: const Duration(seconds: 3),
-                  ),
-                );
-              },
-              child: Opacity(
-                opacity: (!isMe && _isStale(m)) ? 0.4 : 1.0,
-                child: Column(
-                  children: [
-                    CircleAvatar(
-                      radius: 20,
-                      backgroundColor: isMe ? const Color(0xFF1E90FF) : const Color(0xFFFF6B35),
-                      child: Text(
-                        nick.isNotEmpty ? nick[0].toUpperCase() : '?',
-                        style: const TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.bold),
+    return ConstrainedBox(
+      constraints: BoxConstraints(
+        maxHeight: MediaQuery.of(context).size.height * 0.5,
+      ),
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (int i = 0; i < uids.length; i++) ...[
+              if (i > 0) const SizedBox(height: 3),
+              Builder(
+                builder: (context) {
+                  final uid = uids[i];
+                  final m = _members[uid] as Map;
+                  if (m['lat'] == null || m['lng'] == null) {
+                    return const SizedBox.shrink();
+                  }
+                  final nick = m['nickname'] as String? ?? '?';
+                  final lat = (m['lat'] as num).toDouble();
+                  final lng = (m['lng'] as num).toDouble();
+                  final dist = _metersTo(LatLng(lat, lng), _myPosition) / 1000;
+                  final isMe = uid == widget.userId;
+                  final stale = !isMe && _isStale(m);
+                  // 名前は最大3文字、4文字以上は末尾省略
+                  final shortName = nick.length <= 3 ? nick : '${nick.substring(0, 3)}…';
+                  return GestureDetector(
+                    onTap: () {
+                      setState(() => _isFollowingMember = true);
+                      _mapController?.animateCamera(
+                        CameraUpdate.newLatLng(LatLng(lat, lng)),
+                      );
+                    },
+                    child: Opacity(
+                      opacity: stale ? 0.4 : 1.0,
+                      child: Container(
+                        constraints: const BoxConstraints(minWidth: 38),
+                        padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 3),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF0D1B2A).withValues(alpha: 0.85),
+                          border: Border.all(color: Colors.white, width: 1),
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            CircleAvatar(
+                              radius: 8,
+                              backgroundColor: isMe
+                                  ? const Color(0xFF1E90FF)
+                                  : const Color(0xFFFF6B35),
+                              child: Text(
+                                nick.isNotEmpty ? nick[0].toUpperCase() : '?',
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 8,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ),
+                            const SizedBox(height: 1),
+                            Text(
+                              shortName,
+                              maxLines: 1,
+                              overflow: TextOverflow.clip,
+                              style: const TextStyle(color: Colors.white, fontSize: 8),
+                            ),
+                            Text(
+                              isMe
+                                  ? '自分'
+                                  : (stale ? _formatElapsed(m) : '${dist.toStringAsFixed(1)}km'),
+                              maxLines: 1,
+                              overflow: TextOverflow.clip,
+                              style: TextStyle(
+                                color: stale ? const Color(0xFFFFB74D) : Colors.grey[400],
+                                fontSize: 7,
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
                     ),
-                    const SizedBox(height: 2),
-                    Text(nick, style: const TextStyle(color: Colors.white, fontSize: 11)),
-                    if (isMe)
-                      Text('自分', style: TextStyle(color: Colors.grey[400], fontSize: 10))
-                    else if (_isStale(m))
-                      Text(
-                        _formatElapsed(m),
-                        style: const TextStyle(color: Color(0xFFFFB74D), fontSize: 10),
-                      )
-                    else
-                      Text(
-                        '${dist.toStringAsFixed(1)}km',
-                        style: TextStyle(color: Colors.grey[400], fontSize: 10),
-                      ),
-                  ],
-                ),
+                  );
+                },
               ),
-            ),
-          );
-        },
+            ],
+          ],
+        ),
       ),
     );
-  }
-
-  String _bearingToDirection(double bearing) {
-    if (bearing < -157.5 || bearing >= 157.5) return '南';
-    if (bearing < -112.5) return '南西';
-    if (bearing < -67.5) return '西';
-    if (bearing < -22.5) return '北西';
-    if (bearing < 22.5) return '北';
-    if (bearing < 67.5) return '北東';
-    if (bearing < 112.5) return '東';
-    return '南東';
   }
 }
 
