@@ -1583,12 +1583,113 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     _mapController!.animateCamera(update);
   }
 
+  // Phase A-4: 「現在地へ戻る」ボタンのダブルタップで全メンバーが画面に収まる範囲にズーム。
+  // - 自分から 10km 超のメンバーは除外し、SnackBar で通知
+  // - tilt 0、bearing 0、padding 80 の真俯瞰
+  // - _isFollowingMember=true を維持: GPS update のカメラ上書きをガード（行 1437/1479/1069）
+  // - 自分のみ or 全員遠すぎる場合は自分中心ズーム17にフォールバック
+  void _zoomToAllMembers() {
+    if (_mapController == null) return;
+    final List<LatLng> points = [_myPosition];
+    final List<String> excluded = [];
+    for (final entry in _members.entries) {
+      final uid = entry.key;
+      if (uid == widget.userId) continue;
+      final m = entry.value as Map;
+      if (m['lat'] == null || m['lng'] == null) continue;
+      final lat = (m['lat'] as num).toDouble();
+      final lng = (m['lng'] as num).toDouble();
+      final pos = LatLng(lat, lng);
+      if (_metersTo(pos, _myPosition) > 10000) {
+        excluded.add(m['nickname'] as String? ?? '?');
+        continue;
+      }
+      points.add(pos);
+    }
+    if (excluded.isNotEmpty && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('${excluded.join('、')}さんは10km以上離れているため範囲外'),
+          duration: const Duration(seconds: 3),
+        ),
+      );
+    }
+    if (points.length < 2) {
+      // 自分のみ → 自分中心ズーム17にフォールバック（ナビ中の3D解除も兼ねて真俯瞰）
+      setState(() {
+        _isFollowingMember = false;
+        _currentZoom = 17.0;
+      });
+      _animateCamera(
+        CameraUpdate.newLatLngZoom(_myPosition, 17.0),
+        programmatic: true,
+      );
+      return;
+    }
+    double minLat = points.first.latitude;
+    double maxLat = points.first.latitude;
+    double minLng = points.first.longitude;
+    double maxLng = points.first.longitude;
+    for (final p in points) {
+      if (p.latitude < minLat) minLat = p.latitude;
+      if (p.latitude > maxLat) maxLat = p.latitude;
+      if (p.longitude < minLng) minLng = p.longitude;
+      if (p.longitude > maxLng) maxLng = p.longitude;
+    }
+    final bounds = LatLngBounds(
+      southwest: LatLng(minLat, minLng),
+      northeast: LatLng(maxLat, maxLng),
+    );
+    _lastProgrammaticMoveAt = DateTime.now();
+    // 先に tilt/bearing を即時リセット（newLatLngBounds は target/zoom のみ更新のため）
+    _mapController!.moveCamera(
+      CameraUpdate.newCameraPosition(
+        CameraPosition(
+          target: _myPosition,
+          bearing: 0,
+          tilt: 0,
+          zoom: _currentZoom,
+        ),
+      ),
+    );
+    // 次に bounds に合わせてズーム調整
+    _mapController!.animateCamera(
+      CameraUpdate.newLatLngBounds(bounds, 80),
+    );
+  }
+
+  // Phase A-4: ナビ確定後（_isRoutePreview=false かつ _routes.isNotEmpty）の
+  // カメラ表示用設定を返すヘルパー。
+  // - ナビ中: 自車を画面下1/3 に置くため bearing 方向に 200m オフセット、tilt 60度の3Dビュー
+  //   （初回 100m では中央寄りすぎたため 200m に拡大）
+  // - それ以外（プレビュー中・目的地なし・案内終了直後）: target そのまま、tilt 0
+  // 約数 111320 は 1度あたりの緯度メートル換算。経度は cos(lat) で補正。
+  ({LatLng target, double tilt}) _navCameraConfig(LatLng position, double bearing) {
+    final isNavigating = !_isRoutePreview && _routes.isNotEmpty;
+    if (!isNavigating) {
+      return (target: position, tilt: 0.0);
+    }
+    const offsetMeters = 200.0;
+    final dx = sin(bearing * pi / 180) * offsetMeters;
+    final dy = cos(bearing * pi / 180) * offsetMeters;
+    final cosLat = cos(position.latitude * pi / 180);
+    final offsetLat = position.latitude + dy / 111320;
+    final offsetLng = position.longitude + dx / (111320 * cosLat);
+    return (target: LatLng(offsetLat, offsetLng), tilt: 60.0);
+  }
+
   void _animateCameraWithBearing(LatLng target, double bearing) {
     if (_mapController == null) return;
     _lastProgrammaticMoveAt = DateTime.now();
+    final config = _navCameraConfig(target, bearing);
     _mapController!.animateCamera(
       CameraUpdate.newCameraPosition(
-        CameraPosition(target: target, bearing: bearing, zoom: _currentZoom, tilt: 0),
+        CameraPosition(
+          target: config.target,
+          bearing: bearing,
+          zoom: _currentZoom,
+          tilt: config.tilt,
+        ),
       ),
     );
   }
@@ -1597,9 +1698,15 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   void _moveCameraWithBearing(LatLng target, double bearing) {
     if (_mapController == null) return;
     _lastProgrammaticMoveAt = DateTime.now();
+    final config = _navCameraConfig(target, bearing);
     _mapController!.animateCamera(
       CameraUpdate.newCameraPosition(
-        CameraPosition(target: target, bearing: bearing, zoom: _currentZoom, tilt: 0),
+        CameraPosition(
+          target: config.target,
+          bearing: bearing,
+          zoom: _currentZoom,
+          tilt: config.tilt,
+        ),
       ),
     );
   }
@@ -2006,12 +2113,23 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
             child: Center(
               child: GestureDetector(
                 onTap: () {
-                  setState(() => _isFollowingMember = false);
-                  _animateCamera(
-                    CameraUpdate.newLatLngZoom(_myPosition, 17.0),
-                    programmatic: true,
-                  );
+                  // Phase A-4: ナビ中はオフセット + tilt 60 維持で復帰、それ以外はズーム17の真俯瞰
+                  final isNavigating = !_isRoutePreview && _routes.isNotEmpty;
+                  setState(() {
+                    _isFollowingMember = false;
+                    _currentZoom = 17.0;
+                  });
+                  if (isNavigating) {
+                    _animateCameraWithBearing(_myPosition, _currentBearing);
+                  } else {
+                    _animateCamera(
+                      CameraUpdate.newLatLngZoom(_myPosition, 17.0),
+                      programmatic: true,
+                    );
+                  }
                 },
+                // Phase A-4: ダブルタップで全メンバーが画面に収まる範囲にズーム
+                onDoubleTap: _zoomToAllMembers,
                 child: Container(
                   padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
                   decoration: BoxDecoration(
