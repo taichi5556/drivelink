@@ -2861,20 +2861,28 @@ class _MainScreenState extends State<MainScreen>
               ),
               const SizedBox(width: 8),
               // 現在地（タップ: センタリング + zoom17 / ダブルタップ: 全メンバー収まるズーム）
+              // 追従中（_isFollowingMember=false）は青色 active、追従外れ（true）は灰色 inactive で
+              // タップで追従復帰できることを視覚的に示す（ヘディングアップと同パターン）。
               GestureDetector(
                 onTap: _handleRecenterTap,
                 onDoubleTap: _zoomToAllMembers,
                 child: Container(
                   width: 44,
                   height: 44,
-                  decoration: const BoxDecoration(
-                    color: Color(0xFF00D4FF),
+                  decoration: BoxDecoration(
+                    color: _isFollowingMember
+                        ? const Color(0xFF1A3A5C).withValues(alpha: 0.9)
+                        : const Color(0xFF00D4FF),
                     shape: BoxShape.circle,
-                    boxShadow: [BoxShadow(color: Colors.black26, blurRadius: 4)],
+                    boxShadow: const [
+                      BoxShadow(color: Colors.black26, blurRadius: 4),
+                    ],
                   ),
-                  child: const Icon(
+                  child: Icon(
                     Icons.my_location,
-                    color: Colors.white,
+                    color: _isFollowingMember
+                        ? Colors.white70
+                        : Colors.white,
                     size: 22,
                   ),
                 ),
