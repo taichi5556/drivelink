@@ -238,6 +238,10 @@ class _MainScreenState extends State<MainScreen>
   bool _debugLogEnabled = false;
   int _debugTapCount = 0;
   DateTime? _lastDebugTapTime;
+  // GPS偽装トグル（隠しメニュー）。ON で位置を東京駅に固定し
+  // _locationSubscription をキャンセル → ナビロジック連鎖停止
+  bool _gpsSpoofEnabled = false;
+  static const LatLng _kSpoofPosition = LatLng(35.6812, 139.7671);  // 東京駅
 
   void _appendDebugLog(String msg) {
     final timestamp = DateTime.now().toIso8601String().substring(11, 19);
@@ -308,6 +312,8 @@ class _MainScreenState extends State<MainScreen>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
+      // GPS 偽装中は復帰時の GPS 再起動をスキップ（意図しない解除を回避）
+      if (_gpsSpoofEnabled) return;
       _locationSubscription?.cancel();
       _startLocationStream();
       _updateLocation();
@@ -2905,12 +2911,21 @@ class _MainScreenState extends State<MainScreen>
       ),
       actions: [
         // 隠しデバッグメニュー（TouriLink ロゴ10回タップで解禁時のみ表示）
-        if (_debugLogEnabled)
+        if (_debugLogEnabled) ...[
+          IconButton(
+            tooltip: _gpsSpoofEnabled ? 'GPS偽装 ON（東京駅）' : 'GPS偽装',
+            icon: Icon(
+              _gpsSpoofEnabled ? Icons.location_off : Icons.location_searching,
+              color: Colors.purple,
+            ),
+            onPressed: _toggleGpsSpoof,
+          ),
           IconButton(
             tooltip: '逸脱判定ログ',
             icon: const Icon(Icons.bug_report, color: Colors.purple),
             onPressed: _showDebugLogDialog,
           ),
+        ],
         // 位置共有スイッチ（GPSラベル付き）
         Row(
           mainAxisSize: MainAxisSize.min,
@@ -3381,6 +3396,47 @@ class _MainScreenState extends State<MainScreen>
           ),
         );
       }
+    }
+  }
+
+  // GPS偽装トグル（隠しデバッグメニュー）。
+  // ON: _locationSubscription をキャンセルして _myPosition を東京駅に固定。
+  //     _handlePositionUpdate が呼ばれなくなるため、逸脱判定・通過判定・音声案内・
+  //     カメラ追従・残距離検知・逆走検知・step 判定が全連鎖停止。
+  //     既存の polyline / マーカーは描画維持（テスト用）。
+  // OFF: 通常 GPS ストリームに復帰。
+  void _toggleGpsSpoof() {
+    if (_gpsSpoofEnabled) {
+      setState(() => _gpsSpoofEnabled = false);
+      _locationSubscription?.cancel();
+      _startLocationStream();
+    } else {
+      _locationSubscription?.cancel();
+      setState(() {
+        _gpsSpoofEnabled = true;
+        _myPosition = _kSpoofPosition;
+        _displayMyPosition = _kSpoofPosition;
+        _animFrom = _kSpoofPosition;
+        _animTo = _kSpoofPosition;
+        _hasGpsFix = true;
+        _hasFirstFix = true;
+      });
+      _rebuildMarkers();
+      _animateCamera(
+        CameraUpdate.newLatLngZoom(_kSpoofPosition, 15.0),
+        programmatic: true,
+      );
+    }
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(_gpsSpoofEnabled
+              ? '📍 GPS偽装 ON（東京駅 / ナビロジック停止）'
+              : '📍 GPS偽装 OFF'),
+          duration: const Duration(seconds: 2),
+          backgroundColor: const Color(0xFF1A3A5C),
+        ),
+      );
     }
   }
 
