@@ -2248,6 +2248,40 @@ class _MainScreenState extends State<MainScreen>
     }
   }
 
+  /// 右下コラムの +/- ズームボタン処理。
+  /// programmatic: true で _lastProgrammaticMoveAt を更新 → onCameraMoveStarted の guard で
+  /// _isFollowingMember は変化せず、GPS 自動追従を切らない。
+  /// CameraUpdate.zoomBy は target/bearing/tilt を保持するので自車中心ズームが維持される。
+  void _handleZoomIn() {
+    _animateCamera(CameraUpdate.zoomBy(1), programmatic: true);
+  }
+
+  void _handleZoomOut() {
+    _animateCamera(CameraUpdate.zoomBy(-1), programmatic: true);
+  }
+
+  /// 右下コラムのシンプルな 44x44 円形マップ操作ボタン共通ビルダ（+/-）。
+  Widget _buildSquareMapButton({
+    required IconData icon,
+    required VoidCallback onTap,
+    required Color bgColor,
+    required Color iconColor,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        width: 44,
+        height: 44,
+        decoration: BoxDecoration(
+          color: bgColor,
+          shape: BoxShape.circle,
+          boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 4)],
+        ),
+        child: Icon(icon, color: iconColor, size: 24),
+      ),
+    );
+  }
+
   // - 自分から 10km 超のメンバーは除外し、SnackBar で通知
   // - tilt 0、bearing 0、padding 80 の真俯瞰
   // - _isFollowingMember=true を維持: GPS update のカメラ上書きをガード（行 1437/1479/1069）
@@ -2800,98 +2834,85 @@ class _MainScreenState extends State<MainScreen>
           }
         },
         ),
-        // 現在地に戻るFAB（追従停止中のみ表示）。
-        // ナビ中：右下の 44x44 アイコン円（ヘディングアップと並列）
-        // 非ナビ：従来のピル型・中央下
-        if (_isFollowingMember && isNav)
-          Positioned(
-            // ヘディングアップ (right:12, w:44) の左隣に 8px 間隔で並べる → right: 12 + 44 + 8 = 64
-            right: 64,
-            bottom: 86,
-            child: GestureDetector(
-              onTap: _handleRecenterTap,
-              onDoubleTap: _zoomToAllMembers,
-              child: Container(
-                width: 44,
-                height: 44,
-                decoration: const BoxDecoration(
-                  color: Color(0xFF00D4FF),
-                  shape: BoxShape.circle,
-                  boxShadow: [BoxShadow(color: Colors.black26, blurRadius: 4)],
-                ),
-                child: const Icon(Icons.my_location, color: Colors.white, size: 22),
-              ),
-            ),
-          ),
-        if (_isFollowingMember && !isNav)
-          Positioned(
-            left: 0,
-            right: 0,
-            bottom: 24,
-            child: Center(
-              child: GestureDetector(
-                onTap: _handleRecenterTap,
-                onDoubleTap: _zoomToAllMembers,
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF00D4FF),
-                    borderRadius: BorderRadius.circular(24),
-                    boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 4)],
-                  ),
-                  child: const Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(Icons.my_location, color: Colors.white, size: 20),
-                      SizedBox(width: 8),
-                      Text(
-                        '現在地へ戻る',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 14,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          ),
-        // ヘディングアップ ON/OFF ボタン
-        // ナビ中はシート（折りたたみ ~70px）の上に逃がす（bottom: 86）
+        // 右下 4 縦列ボタン（上から: + / − / 現在地 / ヘディングアップ）
+        // ズームボタン操作で GPS 追従は切れない（programmatic: true により onCameraMoveStarted guard）
+        // ナビ中はシート（折りたたみ ~70px）の上に逃がす（最下段 bottom: 86）
         Positioned(
           right: 12,
           bottom: isNav ? 86 : 12,
-          child: GestureDetector(
-            onTap: () {
-              final newVal = !_headingUp;
-              setState(() {
-                _headingUp = newVal;
-                if (newVal) _isFollowingMember = false;
-              });
-              if (newVal) {
-                _animateCameraWithBearing(_myPosition, _currentBearing);
-              } else {
-                _animateCameraWithBearing(_myPosition, 0);
-              }
-            },
-            child: Container(
-              width: 44,
-              height: 44,
-              decoration: BoxDecoration(
-                color: _headingUp
-                    ? const Color(0xFF00D4FF)
-                    : const Color(0xFF1A3A5C).withValues(alpha: 0.9),
-                shape: BoxShape.circle,
-                boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 4)],
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // ＋ ズームイン
+              _buildSquareMapButton(
+                icon: Icons.add,
+                onTap: _handleZoomIn,
+                bgColor: const Color(0xFF1A3A5C).withValues(alpha: 0.9),
+                iconColor: Colors.white,
               ),
-              child: Icon(
-                Icons.navigation,
-                color: _headingUp ? Colors.white : Colors.white70,
-                size: 24,
+              const SizedBox(height: 8),
+              // − ズームアウト
+              _buildSquareMapButton(
+                icon: Icons.remove,
+                onTap: _handleZoomOut,
+                bgColor: const Color(0xFF1A3A5C).withValues(alpha: 0.9),
+                iconColor: Colors.white,
               ),
-            ),
+              const SizedBox(height: 8),
+              // 現在地（タップ: センタリング + zoom17 / ダブルタップ: 全メンバー収まるズーム）
+              GestureDetector(
+                onTap: _handleRecenterTap,
+                onDoubleTap: _zoomToAllMembers,
+                child: Container(
+                  width: 44,
+                  height: 44,
+                  decoration: const BoxDecoration(
+                    color: Color(0xFF00D4FF),
+                    shape: BoxShape.circle,
+                    boxShadow: [BoxShadow(color: Colors.black26, blurRadius: 4)],
+                  ),
+                  child: const Icon(
+                    Icons.my_location,
+                    color: Colors.white,
+                    size: 22,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 8),
+              // ヘディングアップ ON/OFF
+              GestureDetector(
+                onTap: () {
+                  final newVal = !_headingUp;
+                  setState(() {
+                    _headingUp = newVal;
+                    if (newVal) _isFollowingMember = false;
+                  });
+                  if (newVal) {
+                    _animateCameraWithBearing(_myPosition, _currentBearing);
+                  } else {
+                    _animateCameraWithBearing(_myPosition, 0);
+                  }
+                },
+                child: Container(
+                  width: 44,
+                  height: 44,
+                  decoration: BoxDecoration(
+                    color: _headingUp
+                        ? const Color(0xFF00D4FF)
+                        : const Color(0xFF1A3A5C).withValues(alpha: 0.9),
+                    shape: BoxShape.circle,
+                    boxShadow: const [
+                      BoxShadow(color: Colors.black26, blurRadius: 4),
+                    ],
+                  ),
+                  child: Icon(
+                    Icons.navigation,
+                    color: _headingUp ? Colors.white : Colors.white70,
+                    size: 24,
+                  ),
+                ),
+              ),
+            ],
           ),
         ),
         // プレビュー中のみ表示するフローティングアクション。
@@ -3789,7 +3810,7 @@ class _MainScreenState extends State<MainScreen>
     final uids = _members.keys.toList();
     return ConstrainedBox(
       constraints: BoxConstraints(
-        maxHeight: MediaQuery.of(context).size.height * 0.5,
+        maxHeight: MediaQuery.of(context).size.height * 0.35,
       ),
       child: SingleChildScrollView(
         child: Column(
