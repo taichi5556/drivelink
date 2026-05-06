@@ -1931,6 +1931,11 @@ class _MainScreenState extends State<MainScreen>
       if (initDist < 500) _announcedTiers.add(500);
       if (initDist < 100) _announcedTiers.add(100);
       if (initDist < 30) _announcedTiers.add(30);
+
+      // [調査支援] 次 step の maneuver と発話判定結果をログ出力（発話漏れ追跡用）
+      final nextManeuver = isLast ? '(末尾step)' : (steps[i + 1].maneuver ?? '(null=直進)');
+      final resolved = isLast ? '目的地' : (_maneuverToJa(steps[i + 1].maneuver) ?? '(無音)');
+      _appendDebugLog('[音声] step=$i / maneuver=$nextManeuver → $resolved / initDist=${initDist.toStringAsFixed(0)}m');
     }
 
     // 末尾 step は「目的地」固定、それ以外は次 step の maneuver から日本語生成
@@ -2005,7 +2010,8 @@ class _MainScreenState extends State<MainScreen>
   }
 
   /// Phase C-2: maneuver 文字列を音声案内用の日本語へ変換。null は読み上げ対象外。
-  /// fork-* と ramp-* は同じ「◯方向」で統一（ランプは伝わりにくいため）。
+  /// fork-* / ramp-* / keep-* は同じ「◯方向」で統一（ランプ・緩い分岐は伝わりにくいため）。
+  /// straight / depart / arrive 系 / 未知 は無音（arrive 系は末尾 step で「目的地」発話される）。
   String? _maneuverToJa(String? maneuver) {
     switch (maneuver) {
       case 'turn-left':
@@ -2021,19 +2027,23 @@ class _MainScreenState extends State<MainScreen>
         return 'Uターン';
       case 'fork-left':
       case 'ramp-left':
+      case 'keep-left':
         return '左方向';
       case 'fork-right':
       case 'ramp-right':
+      case 'keep-right':
         return '右方向';
       case 'merge':
         return '合流';
+      case 'ferry':
+      case 'ferry-train':
+        return 'フェリー';
       case 'roundabout-left':
       case 'roundabout-right':
+      case 'rotary':
         return 'ロータリー';
-      case 'keep-left':
-      case 'keep-right':
       default:
-        return null; // 車線維持・直進は読み上げない
+        return null;
     }
   }
 
