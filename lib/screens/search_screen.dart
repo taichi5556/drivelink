@@ -327,15 +327,15 @@ class _SearchScreenState extends State<SearchScreen> {
                   onPressed: widget.hasActiveRoute
                       ? () {
                           Navigator.pop(dialogCtx);
-                          if (mounted) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(
-                                content: Text('経由地機能は準備中です'),
-                                backgroundColor: Color(0xFF1A3A5C),
-                                duration: Duration(seconds: 2),
-                              ),
-                            );
-                          }
+                          Navigator.pop(
+                            context,
+                            SearchResultAction(
+                              type: 'waypoint',
+                              name: name,
+                              lat: lat,
+                              lng: lng,
+                            ),
+                          );
                         }
                       : null,
                 ),

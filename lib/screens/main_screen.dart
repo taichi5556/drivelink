@@ -81,6 +81,9 @@ class _MainScreenState extends State<MainScreen>
   String _groupDestName = '';
   StreamSubscription? _destSubscription;
   Set<Polyline> _polylines = {};
+  // M-1d: ユーザー追加経由地（順序保持）。via: でルートに通過点として渡す
+  final List<LatLng> _waypoints = [];
+  final List<String> _waypointNames = [];
   StreamSubscription? _appLinkSubscription;
   final _appLinks = AppLinks();
   LatLng? get _activeDestination => _groupDestination;
@@ -1130,6 +1133,19 @@ class _MainScreenState extends State<MainScreen>
       ));
     }
 
+    // M-1d: 経由地マーカー（hueOrange、目的地の hueBlue と区別）
+    for (int i = 0; i < _waypoints.length; i++) {
+      newMarkers.add(Marker(
+        markerId: MarkerId('waypoint_$i'),
+        position: _waypoints[i],
+        icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueOrange),
+        infoWindow: InfoWindow(
+          title: _waypointNames[i],
+          snippet: '経由地 ${i + 1}',
+        ),
+      ));
+    }
+
     // 警告マーカー
     final warningIcon = await _getWarningMarker();
     _warnings.forEach((id, val) {
@@ -1154,6 +1170,27 @@ class _MainScreenState extends State<MainScreen>
   }
 
   // ── ここまで警告ポイント ───────────────────────────────────────
+
+  /// M-1d: 経由地を末尾に追加してルート再計算 + マーカー更新。
+  /// 呼出側で _groupDestination != null を保証する（ボタンの活性条件で担保済）。
+  Future<void> _addWaypoint(LatLng latLng, String name) async {
+    if (_groupDestination == null) return;
+    setState(() {
+      _waypoints.add(latLng);
+      _waypointNames.add(name);
+    });
+    _rebuildMarkers();              // 経由地マーカーを即時表示
+    await _fetchRoute(_groupDestination!);  // 経由地込みで再計算
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('経由地「$name」を追加しました'),
+          backgroundColor: const Color(0xFF1A3A5C),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    }
+  }
 
   void _updateDestinationMarker() {
     final dest = _activeDestination;
@@ -1192,15 +1229,20 @@ class _MainScreenState extends State<MainScreen>
 
       // Uターン回避: B-6/B-7 自動再検索時のみ、進行方向に少し先の点を via waypoint として追加。
       // via: プレフィックスで停車地扱いを回避（leg 分割を起こさず単一 leg のまま）。
-      String waypointParam = '';
+      // M-1d: ユーザー追加経由地（_waypoints）も同様に via: で連結。順序: anti-U-turn → user[0..n]。
+      final wpList = <String>[];
       if (addAntiUTurnWaypoint && _currentSpeed >= _waypointMinSpeedMps) {
         final offsetMeters = _currentSpeed * _waypointLookaheadSec;
         final wp = _destinationLatLng(_myPosition, _currentBearing, offsetMeters);
-        waypointParam = '&waypoints=via:${wp.latitude},${wp.longitude}';
+        wpList.add('via:${wp.latitude},${wp.longitude}');
         _appendDebugLog(
           '[再検索waypoint] +${offsetMeters.toStringAsFixed(0)}m 方位${_currentBearing.toStringAsFixed(0)}° → ${wp.latitude.toStringAsFixed(5)},${wp.longitude.toStringAsFixed(5)}',
         );
       }
+      for (final userWp in _waypoints) {
+        wpList.add('via:${userWp.latitude},${userWp.longitude}');
+      }
+      final waypointParam = wpList.isEmpty ? '' : '&waypoints=${wpList.join('|')}';
 
       final url = 'https://maps.googleapis.com/maps/api/directions/json'
           '?origin=$origin&destination=$destination'
@@ -1441,18 +1483,29 @@ class _MainScreenState extends State<MainScreen>
         // 新規目的地検索時は「高速優先」にリセット。
         // 前回「一般道優先」のまま検索すると意図せず狭い道が選ばれることがあるため。
         _routePreference = 'highway';
+        // M-1d: 新目的地で経由地もリセット（前ルートの経由地は意味を失う）
+        _waypoints.clear();
+        _waypointNames.clear();
       });
       _updateDestinationMarker();
       // 「現在地」は履歴に保存しない（既存挙動踏襲）
       if (result.name != '現在地') {
         _saveDestHistory(result.name!, result.lat!, result.lng!);
       }
+    } else if (result.type == 'waypoint') {
+      // M-1d: 経由地として追加
+      await _addWaypoint(
+        LatLng(result.lat!, result.lng!),
+        result.name!,
+      );
     } else if (result.type == 'reset') {
       setState(() {
         _groupDestination = null;
         _groupDestName = '';
         _isRoutePreview = false;
         _isShared = false;
+        _waypoints.clear();
+        _waypointNames.clear();
       });
       _updateDestinationMarker();
     }
@@ -3244,6 +3297,8 @@ class _MainScreenState extends State<MainScreen>
       _selectedRouteIndex = 0;
       _headingUp = false;
       _inRouteOverview = false;
+      _waypoints.clear();
+      _waypointNames.clear();
     });
     _updateDestinationMarker();
     _setPersonalDestination();
@@ -3405,6 +3460,8 @@ class _MainScreenState extends State<MainScreen>
                   _headingUp = false;
                   _isRoutePreview = false;
                   _isShared = false;
+                  _waypoints.clear();
+                  _waypointNames.clear();
                 });
                 _animateCameraWithBearing(_myPosition, 0);
                 _updateDestinationMarker();
