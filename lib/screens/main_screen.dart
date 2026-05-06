@@ -85,7 +85,7 @@ class _MainScreenState extends State<MainScreen>
   LatLng? get _activeDestination => _groupDestination;
   String get _activeDestName => _groupDestName;
 
-  // ルート優先度（'highway' = 高速優先 / 'local' = 下道優先）
+  // ルート優先度（'highway' = 高速優先 / 'local' = 一般道優先）
   // Firebase destination ノードと双方向同期。トグル UI のソースオブトゥルース。
   String _routePreference = 'highway';
 
@@ -1431,7 +1431,7 @@ class _MainScreenState extends State<MainScreen>
         _groupDestName = name;
         _isRoutePreview = true;
         // 新規目的地検索時は「高速優先」にリセット。
-        // 前回「下道優先」のまま検索すると意図せず狭い道が選ばれることがあるため。
+        // 前回「一般道優先」のまま検索すると意図せず狭い道が選ばれることがあるため。
         _routePreference = 'highway';
       });
       _updateDestinationMarker();
@@ -3430,7 +3430,7 @@ class _MainScreenState extends State<MainScreen>
             onTap: () => _onRoutePreferenceToggle('highway'),
           ),
           _buildToggleSegment(
-            label: '🚗 下道優先',
+            label: '🚗 一般道優先',
             isSelected: _routePreference == 'local',
             onTap: () => _onRoutePreferenceToggle('local'),
           ),
