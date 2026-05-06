@@ -1867,7 +1867,7 @@ class _MainScreenState extends State<MainScreen>
     // 直近 1 tier のみ発火（30 を最優先、GPS ジャンプで複数 tier 跨いでも 1 発話に収束）
     if (distance < 30 && !_announcedTiers.contains(30)) {
       _announcedTiers.addAll({30, 100, 500});
-      final text = isLast ? '目的地に到着しました' : maneuverJa;
+      final text = isLast ? '目的地に到着しました' : '$maneuverJaです';
       TtsService.instance.speak(text);
     } else if (distance < 100 && !_announcedTiers.contains(100)) {
       _announcedTiers.addAll({100, 500});
