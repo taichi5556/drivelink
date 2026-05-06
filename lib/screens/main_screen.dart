@@ -53,6 +53,11 @@ class _MainScreenState extends State<MainScreen>
   Set<Marker> _markers = {};
   // 生 GPS 値。ステップ判定 / 逸脱判定 / 距離計算など全ロジックで使用。
   LatLng _myPosition = const LatLng(35.6812, 139.7671);
+  // 一度でも実 GPS を取得したか。検索のロケーションバイアスは fix 済みの時のみ適用
+  // （初期値の東京駅で bias して遠隔地ユーザーの結果を歪めないため）。
+  bool _hasGpsFix = false;
+  // 目的地検索のデバウンス用（300ms）。連打時の API 浪費 + race condition 抑制。
+  Timer? _searchDebounceTimer;
   // Phase B-5: 自車マーカーの表示位置（_myPosition への補間後）。
   // 約 500ms tween でジャンプを滑らかに見せる。生ロジックには使わない。
   LatLng _displayMyPosition = const LatLng(35.6812, 139.7671);
@@ -1402,6 +1407,7 @@ class _MainScreenState extends State<MainScreen>
     const placesApiKey = 'AIzaSyChuUZypiVhojgCO6ZgZML-ZW3eYLtti5c';
 
     void selectDest(BuildContext ctx, String name, double lat, double lng) {
+      _searchDebounceTimer?.cancel(); // 進行中のデバウンスを止めてダイアログ閉じ後の遅延発火を防ぐ
       setState(() {
         _groupDestination = LatLng(lat, lng);
         _groupDestName = name;
@@ -1445,44 +1451,54 @@ class _MainScreenState extends State<MainScreen>
                     enabledBorder: const UnderlineInputBorder(borderSide: BorderSide(color: Colors.grey)),
                     focusedBorder: const UnderlineInputBorder(borderSide: BorderSide(color: Color(0xFF00D4FF))),
                   ),
-                  onChanged: (val) async {
+                  onChanged: (val) {
+                    // C: デバウンス（300ms）。連打時の API 浪費 + race condition 抑制。
+                    _searchDebounceTimer?.cancel();
                     if (val.length < 2) {
                       setStateDialog(() => searchResults = []);
                       return;
                     }
-                    setStateDialog(() => isSearching = true);
-                    try {
-                      final encoded = Uri.encodeComponent(val);
-                      final url = 'https://maps.googleapis.com/maps/api/place/textsearch/json?query=$encoded&language=ja&region=jp&key=$placesApiKey';
-                      final client = HttpClient();
+                    _searchDebounceTimer = Timer(const Duration(milliseconds: 300), () async {
+                      setStateDialog(() => isSearching = true);
                       try {
-                        final request = await client.getUrl(Uri.parse(url));
-                        final response = await request.close();
-                        final body = await response.transform(const Utf8Decoder()).join();
-                        final data = jsonDecode(body);
-                        if (data['status'] == 'OK') {
-                          final results = (data['results'] as List).take(5).map((r) {
-                            final loc = r['geometry']['location'];
-                            return {
-                              'name': r['name'] as String,
-                              'address': r['formatted_address'] as String? ?? '',
-                              'lat': (loc['lat'] as num).toDouble(),
-                              'lng': (loc['lng'] as num).toDouble(),
-                            };
-                          }).toList();
-                          setStateDialog(() {
-                            searchResults = List<Map<String, dynamic>>.from(results);
-                            isSearching = false;
-                          });
-                        } else {
-                          setStateDialog(() { searchResults = []; isSearching = false; });
+                        final encoded = Uri.encodeComponent(val);
+                        // B: ロケーションバイアス（一度でも GPS fix 済みの時のみ。未取得時は全国検索にフォールバック）
+                        final biasParam = _hasGpsFix
+                            ? '&location=${_myPosition.latitude},${_myPosition.longitude}&radius=50000'
+                            : '';
+                        final url = 'https://maps.googleapis.com/maps/api/place/textsearch/json'
+                            '?query=$encoded&language=ja&region=jp$biasParam&key=$placesApiKey';
+                        final client = HttpClient();
+                        try {
+                          final request = await client.getUrl(Uri.parse(url));
+                          final response = await request.close();
+                          final body = await response.transform(const Utf8Decoder()).join();
+                          final data = jsonDecode(body);
+                          if (data['status'] == 'OK') {
+                            // A: 表示件数 5 → 20 件
+                            final results = (data['results'] as List).take(20).map((r) {
+                              final loc = r['geometry']['location'];
+                              return {
+                                'name': r['name'] as String,
+                                'address': r['formatted_address'] as String? ?? '',
+                                'lat': (loc['lat'] as num).toDouble(),
+                                'lng': (loc['lng'] as num).toDouble(),
+                              };
+                            }).toList();
+                            setStateDialog(() {
+                              searchResults = List<Map<String, dynamic>>.from(results);
+                              isSearching = false;
+                            });
+                          } else {
+                            setStateDialog(() { searchResults = []; isSearching = false; });
+                          }
+                        } finally {
+                          client.close();
                         }
-                      } finally {
-                        client.close();
+                      } catch (e) {
+                        setStateDialog(() { searchResults = []; isSearching = false; });
                       }
-                    } catch (e) {
-                      setStateDialog(() { searchResults = []; isSearching = false; });
-                    }
+                    });
                   },
                 ),
                 // 履歴（検索結果がないときだけ表示）
@@ -1552,6 +1568,9 @@ class _MainScreenState extends State<MainScreen>
         ),
       ),
     );
+    // ダイアログ閉了時（barrierDismissible / キャンセルボタン経由含む）に
+    // 進行中のデバウンスを止め、閉じた後の遅延発火を防ぐ。
+    _searchDebounceTimer?.cancel();
   }
 
   Future<void> _shareGroupDestination() async {
@@ -1681,6 +1700,7 @@ class _MainScreenState extends State<MainScreen>
       _markerAnimController?.forward(from: 0);
     }
     setState(() => _myPosition = newPos);
+    _hasGpsFix = true;
     final spd = pos.speed;
     // 負値（取得不可）は 0 扱い。bearing ガードの外で常に更新
     _currentSpeed = spd > 0 ? spd : 0.0;
@@ -1745,6 +1765,7 @@ class _MainScreenState extends State<MainScreen>
         _markerAnimController?.forward(from: 0);
       }
       setState(() => _myPosition = newPos);
+      _hasGpsFix = true;
       if (_shareLocation) {
         await _db.child('rooms/${widget.roomCode}/members/${widget.userId}').update({
           'nickname': widget.nickname,
@@ -2581,6 +2602,7 @@ class _MainScreenState extends State<MainScreen>
     _connectionRefreshTimer?.cancel();
     _routeOverviewTimer?.cancel();
     _routePreferenceDebounceTimer?.cancel();
+    _searchDebounceTimer?.cancel();
     _membersSubscription?.cancel();
     _destSubscription?.cancel();
     _warningsSubscription?.cancel();
