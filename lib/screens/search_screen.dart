@@ -75,8 +75,10 @@ class _SearchScreenState extends State<SearchScreen> {
     setState(() => _isSearching = true);
     try {
       final encoded = Uri.encodeComponent(_searchCtrl.text);
+      // radius=10km は「優先範囲」（絶対制限ではない）。カテゴリ検索（ガソリン等）は
+      // 近場で絞り、固有名詞検索（スカイツリー等）は Google が範囲外の正解も返す。
       final biasParam = widget.hasGpsFix
-          ? '&location=${widget.currentPosition.latitude},${widget.currentPosition.longitude}&radius=50000'
+          ? '&location=${widget.currentPosition.latitude},${widget.currentPosition.longitude}&radius=10000'
           : '';
       final url = 'https://maps.googleapis.com/maps/api/place/textsearch/json'
           '?query=$encoded&language=ja&region=jp$biasParam&key=${widget.placesApiKey}';
@@ -121,9 +123,33 @@ class _SearchScreenState extends State<SearchScreen> {
     }
   }
 
-  /// 結果到着後、自分位置 + 全候補を含む LatLngBounds に合わせてカメラ移動。
+  /// 結果到着後の地図表示。
+  /// - GPS fix あり + 全結果が自分位置 20km 以内 → zoom 14 で自分位置中心
+  /// - それ以外（GPS fix 無し / 遠方の結果あり）→ 自分位置 + 全候補の bounds fit
   void _fitMapToResults() {
     if (_mapController == null || _results.isEmpty) return;
+
+    if (widget.hasGpsFix) {
+      const double nearThresholdMeters = 20000;
+      final allNear = _results.every((r) {
+        final d = _metersTo(
+          widget.currentPosition,
+          LatLng(r['lat'] as double, r['lng'] as double),
+        );
+        return d <= nearThresholdMeters;
+      });
+      if (allNear) {
+        _mapController!.animateCamera(
+          CameraUpdate.newLatLngZoom(widget.currentPosition, 14),
+        );
+        return;
+      }
+    }
+    _animateBoundsFit();
+  }
+
+  /// 自分位置 + 全候補を含む LatLngBounds にフィット（広域表示）。
+  void _animateBoundsFit() {
     final pts = <LatLng>[
       widget.currentPosition,
       ..._results.map((r) => LatLng(r['lat'] as double, r['lng'] as double)),
