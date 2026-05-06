@@ -34,11 +34,14 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
   StreamSubscription? _linkSub;
   static bool _appWasInBackground = false;
   static Timer? _backgroundFlagTimer;
-  bool _consentLocation = false;
-  bool _consentDriving  = false;
-  String _vehicleType = 'car'; // 'car' or 'bike'
+  bool _consentAll = false;
+  // 'car' / 'bike'。Phase L-1 で UI を削除したが、マーカー絵文字（main_screen.dart）等の
+  // 内部ロジックは維持。将来のバイク向け機能差分に備えて読み書きパスは残す。
+  String _vehicleType = 'car';
   int _selectedHours = 4;  // デフォルト4時間
-  bool get _allConsented => _consentLocation && _consentDriving;
+  // Phase L-2: ルーム作成完了パネルのコード表示アコーディオン。デフォルト折りたたみ
+  bool _showRoomCode = false;
+  bool get _allConsented => _consentAll;
 
   @override
   void initState() {
@@ -364,76 +367,6 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
   }
 
 
-  // ─── 車両選択 ─────────────────────────────────────────────
-  Widget _buildVehicleSelector() {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-      decoration: BoxDecoration(
-        color: const Color(0xFF111827),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: const Color(0xFF1E3A5F), width: 1.5),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(children: [
-            const Icon(Icons.directions_car_rounded, color: Color(0xFF00D4FF), size: 16),
-            const SizedBox(width: 6),
-            Text(
-              _isJapanese ? '車両タイプ' : 'Vehicle Type',
-              style: const TextStyle(color: Color(0xFF6680AA), fontSize: 12, fontWeight: FontWeight.w600),
-            ),
-          ]),
-          const SizedBox(height: 10),
-          Row(children: [
-            Expanded(child: _buildVehicleBtn('car',  '🚗', _isJapanese ? '車' : 'Car')),
-            const SizedBox(width: 10),
-            Expanded(child: _buildVehicleBtn('bike', '🏍', _isJapanese ? 'バイク' : 'Bike')),
-          ]),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildVehicleBtn(String type, String emoji, String label) {
-    final selected = _vehicleType == type;
-    return GestureDetector(
-      onTap: () => setState(() => _vehicleType = type),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 200),
-        padding: const EdgeInsets.symmetric(vertical: 10),
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(12),
-          gradient: selected
-              ? const LinearGradient(colors: [Color(0xFF00D4FF), Color(0xFF0057FF)])
-              : null,
-          color: selected ? null : const Color(0xFF0D1B2A),
-          border: Border.all(
-            color: selected ? const Color(0xFF00D4FF) : const Color(0xFF1E3A5F),
-            width: selected ? 2 : 1,
-          ),
-          boxShadow: selected
-              ? [BoxShadow(color: const Color(0xFF00D4FF).withValues(alpha: 0.3), blurRadius: 10)]
-              : [],
-        ),
-        child: Column(
-          children: [
-            Text(emoji, style: const TextStyle(fontSize: 28)),
-            const SizedBox(height: 4),
-            Text(
-              label,
-              style: TextStyle(
-                color: selected ? Colors.white : const Color(0xFF6680AA),
-                fontSize: 13,
-                fontWeight: selected ? FontWeight.w700 : FontWeight.normal,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
   // ─── ナビ案内 ─────────────────────────────────────────────
   Widget _buildInfoRow(String text) {
     return Row(
@@ -459,21 +392,10 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
         borderRadius: BorderRadius.circular(14),
         border: Border.all(color: const Color(0xFF1A4A1A), width: 1.5),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          _buildInfoRow(
-            _isJapanese
-                ? 'ナビの音声はGoogleマップなど別アプリをバックグラウンドで使用してください'
-                : 'Use a separate app (e.g. Google Maps) in the background for voice navigation.',
-          ),
-          const SizedBox(height: 8),
-          _buildInfoRow(
-            _isJapanese
-                ? 'バックグラウンド10分で位置情報の共有が自動停止されます。復帰すると再開されます。'
-                : 'Location sharing stops automatically after 10 minutes in the background and resumes when you return.',
-          ),
-        ],
+      child: _buildInfoRow(
+        _isJapanese
+            ? 'バックグラウンドでも位置情報の共有を継続します。端末の状態により停止する場合があります（その場合は復帰時に自動再開）。'
+            : 'Location sharing continues in the background. It may stop depending on device conditions, in which case it resumes automatically when you return.',
       ),
     );
   }
@@ -503,23 +425,13 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
           ),
         ),
         _buildConsentTile(
-          icon: Icons.location_on_rounded,
-          iconColor: const Color(0xFF00D4FF),
-          text: _isJapanese
-              ? '位置情報を共有します。同意しますか？'
-              : 'I agree to share my location.',
-          value: _consentLocation,
-          onChanged: (v) => setState(() => _consentLocation = v ?? false),
-        ),
-        const SizedBox(height: 6),
-        _buildConsentTile(
-          icon: Icons.car_crash_rounded,
+          icon: Icons.verified_user_rounded,
           iconColor: const Color(0xFFFF6B35),
           text: _isJapanese
-              ? '運転中はアプリを操作しないでください。'
-              : 'Do not operate this app while driving.',
-          value: _consentDriving,
-          onChanged: (v) => setState(() => _consentDriving = v ?? false),
+              ? '位置情報の共有および運転中はアプリを操作しないことに同意します'
+              : 'I agree to share my location and not to operate this app while driving.',
+          value: _consentAll,
+          onChanged: (v) => setState(() => _consentAll = v ?? false),
           isWarning: true,
         ),
         if (!_allConsented) ...[
@@ -527,8 +439,8 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
           Center(
             child: Text(
               _isJapanese
-                  ? '両方にチェックを入れると開始できます'
-                  : 'Check both boxes to continue',
+                  ? 'チェックを入れると開始できます'
+                  : 'Check the box to continue',
               style: const TextStyle(
                 color: Color(0xFF3A5070),
                 fontSize: 11,
@@ -708,8 +620,6 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
             const SizedBox(height: 8),
             _buildTextField(_nicknameController, _nickLabel, Icons.person_outline_rounded),
             const SizedBox(height: 8),
-            _buildVehicleSelector(),
-            const SizedBox(height: 8),
             _buildNaviInfoCard(),
             const SizedBox(height: 8),
             _buildConsentSection(),
@@ -842,65 +752,106 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
                     Text(_isJapanese ? 'ルーム作成完了！' : 'Room Created!',
                       style: const TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.w700)),
                   ]),
-                  const SizedBox(height: 6),
-                  Text(_isJapanese ? 'ルームコード' : 'Room Code',
-                    style: const TextStyle(color: Color(0xFF6680AA), fontSize: 10)),
-                  const SizedBox(height: 3),
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 6),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF111827),
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(color: const Color(0xFF1E3A5F)),
+                  // ルームコードを表示/隠すアコーディオン（デフォルト折りたたみ）
+                  GestureDetector(
+                    onTap: () => setState(() => _showRoomCode = !_showRoomCode),
+                    behavior: HitTestBehavior.opaque,
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 8),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          AnimatedRotation(
+                            turns: _showRoomCode ? 0.5 : 0.0,
+                            duration: const Duration(milliseconds: 200),
+                            child: const Icon(Icons.expand_more_rounded,
+                                color: Color(0xFF00D4FF), size: 18),
+                          ),
+                          const SizedBox(width: 4),
+                          Text(
+                            _showRoomCode
+                                ? (_isJapanese ? 'ルームコードを隠す' : 'Hide Room Code')
+                                : (_isJapanese ? 'ルームコードを表示' : 'Show Room Code'),
+                            style: const TextStyle(
+                                color: Color(0xFF00D4FF),
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600),
+                          ),
+                        ],
+                      ),
                     ),
-                    child: Text(_createdRoomCode!, style: const TextStyle(
-                      color: Color(0xFF00D4FF), fontSize: 26, fontWeight: FontWeight.w900, letterSpacing: 6)),
                   ),
-                  const SizedBox(height: 6),
-                  Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-                    GestureDetector(
-                      onTap: () => _copyRoomCode(_createdRoomCode!),
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-                        decoration: BoxDecoration(
-                          color: const Color(0xFF111827),
-                          borderRadius: BorderRadius.circular(10),
-                          border: Border.all(color: const Color(0xFF1E3A5F)),
-                        ),
-                        child: Row(children: [
-                          const Icon(Icons.copy_rounded, color: Color(0xFF00D4FF), size: 14),
-                          const SizedBox(width: 5),
-                          Text(_isJapanese ? 'コピー' : 'Copy',
-                            style: const TextStyle(color: Color(0xFF00D4FF), fontSize: 12)),
-                        ]),
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                    GestureDetector(
-                      onTap: () => _shareRoomCode(_createdRoomCode!),
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-                        decoration: BoxDecoration(
-                          color: const Color(0xFF111827),
-                          borderRadius: BorderRadius.circular(10),
-                          border: Border.all(color: const Color(0xFF1E3A5F)),
-                        ),
-                        child: Row(children: [
-                          const Icon(Icons.share_rounded, color: Color(0xFF00D4FF), size: 14),
-                          const SizedBox(width: 5),
-                          Text(_isJapanese ? '共有' : 'Share',
-                            style: const TextStyle(color: Color(0xFF00D4FF), fontSize: 12)),
-                        ]),
-                      ),
-                    ),
-                  ]),
+                  AnimatedSize(
+                    duration: const Duration(milliseconds: 250),
+                    curve: Curves.easeInOut,
+                    alignment: Alignment.topCenter,
+                    child: _showRoomCode
+                        ? Column(mainAxisSize: MainAxisSize.min, children: [
+                            Text(_isJapanese ? 'ルームコード' : 'Room Code',
+                                style: const TextStyle(color: Color(0xFF6680AA), fontSize: 10)),
+                            const SizedBox(height: 3),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 6),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFF111827),
+                                borderRadius: BorderRadius.circular(12),
+                                border: Border.all(color: const Color(0xFF1E3A5F)),
+                              ),
+                              child: Text(_createdRoomCode!, style: const TextStyle(
+                                  color: Color(0xFF00D4FF), fontSize: 26, fontWeight: FontWeight.w900, letterSpacing: 6)),
+                            ),
+                            const SizedBox(height: 6),
+                            Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                              GestureDetector(
+                                onTap: () => _copyRoomCode(_createdRoomCode!),
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                                  decoration: BoxDecoration(
+                                    color: const Color(0xFF111827),
+                                    borderRadius: BorderRadius.circular(10),
+                                    border: Border.all(color: const Color(0xFF1E3A5F)),
+                                  ),
+                                  child: Row(children: [
+                                    const Icon(Icons.copy_rounded, color: Color(0xFF00D4FF), size: 14),
+                                    const SizedBox(width: 5),
+                                    Text(_isJapanese ? 'コピー' : 'Copy',
+                                        style: const TextStyle(color: Color(0xFF00D4FF), fontSize: 12)),
+                                  ]),
+                                ),
+                              ),
+                              const SizedBox(width: 10),
+                              GestureDetector(
+                                onTap: () => _shareRoomCode(_createdRoomCode!),
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                                  decoration: BoxDecoration(
+                                    color: const Color(0xFF111827),
+                                    borderRadius: BorderRadius.circular(10),
+                                    border: Border.all(color: const Color(0xFF1E3A5F)),
+                                  ),
+                                  child: Row(children: [
+                                    const Icon(Icons.share_rounded, color: Color(0xFF00D4FF), size: 14),
+                                    const SizedBox(width: 5),
+                                    Text(_isJapanese ? '共有' : 'Share',
+                                        style: const TextStyle(color: Color(0xFF00D4FF), fontSize: 12)),
+                                  ]),
+                                ),
+                              ),
+                            ]),
+                          ])
+                        : const SizedBox.shrink(),
+                  ),
                   TextButton(
                     style: TextButton.styleFrom(
                       minimumSize: Size.zero,
                       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
                       tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                     ),
-                    onPressed: () => setState(() => _createdRoomCode = null),
+                    onPressed: () => setState(() {
+                      _createdRoomCode = null;
+                      _showRoomCode = false;
+                    }),
                     child: Text(_isJapanese ? '← 戻る' : '← Back',
                       style: const TextStyle(color: Color(0xFF3A5078), fontSize: 12)),
                   ),

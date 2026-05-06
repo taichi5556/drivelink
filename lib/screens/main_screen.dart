@@ -14,7 +14,9 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:google_mobile_ads/google_mobile_ads.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../services/room_history.dart';
+import '../services/tts_service.dart';
 import 'login_screen.dart';
+import 'search_screen.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:app_links/app_links.dart';
 import 'package:flutter_polyline_points/flutter_polyline_points.dart';
@@ -39,7 +41,8 @@ class MainScreen extends StatefulWidget {
   State<MainScreen> createState() => _MainScreenState();
 }
 
-class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
+class _MainScreenState extends State<MainScreen>
+    with WidgetsBindingObserver, TickerProviderStateMixin {
   GoogleMapController? _mapController;
   bool _isFollowingMember = false;
   late bool _shareLocation;
@@ -49,7 +52,21 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   // この時間以内のonCameraMoveStartedはプログラム由来とみなす（ms）
   static const _programmaticMoveGuardMs = 100;
   Set<Marker> _markers = {};
+  // 生 GPS 値。ステップ判定 / 逸脱判定 / 距離計算など全ロジックで使用。
   LatLng _myPosition = const LatLng(35.6812, 139.7671);
+  // 一度でも実 GPS を取得したか。検索のロケーションバイアスは fix 済みの時のみ適用
+  // （初期値の東京駅で bias して遠隔地ユーザーの結果を歪めないため）。
+  bool _hasGpsFix = false;
+  // 目的地検索のデバウンス用（300ms）。連打時の API 浪費 + race condition 抑制。
+  Timer? _searchDebounceTimer;
+  // Phase B-5: 自車マーカーの表示位置（_myPosition への補間後）。
+  // 約 500ms tween でジャンプを滑らかに見せる。生ロジックには使わない。
+  LatLng _displayMyPosition = const LatLng(35.6812, 139.7671);
+  LatLng _animFrom = const LatLng(35.6812, 139.7671);
+  LatLng _animTo = const LatLng(35.6812, 139.7671);
+  AnimationController? _markerAnimController;
+  // 初回 GPS 取得済みフラグ。初回はデフォルト東京座標から現在地へ tween しないようスナップ。
+  bool _hasFirstFix = false;
   Timer? _expiryTimer;
   String _remainingTime = '';
   Timer? _countdownTimer;
@@ -64,12 +81,17 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   String _groupDestName = '';
   StreamSubscription? _destSubscription;
   Set<Polyline> _polylines = {};
+  // M-1d: ユーザー追加経由地（順序保持）。via: でルートに通過点として渡す
+  final List<LatLng> _waypoints = [];
+  final List<String> _waypointNames = [];
+  // M-1d 到着判定: 経由地ごとの「まもなく経由地」発話済みフラグ。_waypoints と同期維持
+  final List<bool> _waypointSaidNear = [];
   StreamSubscription? _appLinkSubscription;
   final _appLinks = AppLinks();
   LatLng? get _activeDestination => _groupDestination;
   String get _activeDestName => _groupDestName;
 
-  // ルート優先度（'highway' = 高速優先 / 'local' = 下道優先）
+  // ルート優先度（'highway' = 高速優先 / 'local' = 一般道優先）
   // Firebase destination ノードと双方向同期。トグル UI のソースオブトゥルース。
   String _routePreference = 'highway';
 
@@ -93,6 +115,15 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   static const _rerouteThresholdLowSpeedMeters  = 30.0;   // 50km/h 未満時の逸脱判定距離
   static const _rerouteSpeedThresholdMps        = 13.89;  // 高低閾値の境界（50km/h）
   static const _rerouteCooldownSecs             = 20;     // 再検索間隔（秒）
+
+  // Uターン回避用 waypoint（B-6 逆走検知 / B-7 残距離増加検知の再検索時のみ適用）
+  // 進行方向に少し先の点を waypoint として渡し、物理的に Uターン不可能なルートを生成させる。
+  static const _waypointMinSpeedMps   = 1.389; // 5 km/h（これ未満では waypoint 追加しない）
+  static const _waypointLookaheadSec  = 3.0;   // 速度 × この秒数 = waypoint までの距離
+
+  // Phase F-1: 停車時 bearing 固定。速度がこの値未満の時は GPS bearing 更新を止め
+  // 直近の値を維持する（停車・徐行・室内 GPS ジッタで画面がぐるぐる回るのを防ぐ）。
+  static const _bearingUpdateMinSpeedMps = 0.55; // 約 2 km/h
 
   // 接続状態判定（last_seen の経過時間がこの値を超えたら「接続切れ」表示）
   static const _connectionStaleSecs = 60;
@@ -138,6 +169,43 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   List<LatLng> get _routePoints =>
       _routes.isEmpty ? const [] : _routes[_selectedRouteIndex].points;
 
+  // Phase B-2: ステップ判定（投影方式 + 3秒デバウンス）
+  // ナビ中の現在 step。B-3 案内バナーが「次の曲がる場所まで N m」を出すために使用。
+  int _currentStepIndex = 0;
+  // 切替候補。位置更新ごとに最近接 step を計算し、現 step と異なれば候補にする。
+  int? _pendingStepIndex;
+  // 候補が初めて検出された時刻。経過 >= 3秒で切替確定（GPS ジッタ・分岐点の誤判定を吸収）。
+  DateTime? _pendingSince;
+  static const Duration _stepDebounceDuration = Duration(seconds: 3);
+
+  // Phase C-2: 音声案内の tier 管理
+  // step が切り替わるたびに _announcedTiers をリセットし、開始時点で既に通過済みの
+  // tier（500/100/30）は announced 扱いにして読み上げをスキップ（plan A：過去 tier 無音化）。
+  int _lastVoiceStepIdx = -1;
+  Set<int> _announcedTiers = <int>{};
+
+  // 2D/3D 表示モード。デフォルト 2D（_is3D=false）。永続化キー: 'map_tilt_mode'（'2D'/'3D'）
+  // 3D: ナビ中 tilt=60 + 自車下寄せ / 2D: ナビ中も tilt=0 + 自車中心
+  bool _is3D = false;
+  static const _kMapTiltModeKey = 'map_tilt_mode';
+
+  // Phase B-7: 残り距離増加検知（90° ズレで B-6 がヒットしないケースを補完）
+  // GPS tick ごとに _remainingDistanceMeters を記録、10秒前比で +100m 以上増 + 速度 5km/h 以上で再検索。
+  // Cooldown は B-6 と共用（_lastRerouteTime / _rerouteCooldownSecs / _rerouteInFlight）。
+  final List<_DistSample> _distSamples = [];
+  static const Duration _distHistoryDuration = Duration(seconds: 10);
+  static const double _distIncreaseThresholdMeters = 100.0;
+  static const double _distIncreaseSpeedMps = 5.0 / 3.6; // 5 km/h
+
+
+  // Phase B-6: 逆走検知 → 自動再検索
+  // 速度 >= 18km/h かつ 走行方向と進路方向の角度差 >= 135° が連続3秒で確定 → _fetchRoute(reroute) 発火。
+  // 多重発火防止は逸脱判定と同じ _rerouteInFlight / _lastRerouteTime（_rerouteCooldownSecs=20s）を共用。
+  static const double _reverseSpeedThresholdMps = 5.0; // 18km/h
+  static const double _reverseAngleThresholdDeg = 135.0;
+  static const Duration _reverseDebounceDuration = Duration(seconds: 3);
+  DateTime? _reverseSince;
+
   // 車両マーカーキャッシュ（vehicleType-isMe → BitmapDescriptor）
   final Map<String, BitmapDescriptor> _markerCache = {};
 
@@ -148,6 +216,17 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     Color(0xFF1E88E5), // 青
     Color(0xFF43A047), // 緑
   ];
+
+  // Phase D-1: ナビシート (DraggableScrollableSheet) 制御用。
+  // ナビ確定直後に展開→5秒で折りたたみ。ユーザー操作（指タップ）でタイマー即キャンセル。
+  final DraggableScrollableController _sheetController =
+      DraggableScrollableController();
+  Timer? _sheetAutoCollapseTimer;
+  // _buildNavigationSheet で計算した実 min/max を animateTo で再利用するためキャッシュ
+  double _sheetMinSize = 0.06;
+  double _sheetMaxSize = 0.40;
+  // GestureDetector でシート全体を縦ドラッグする際に jumpTo 量を画面比に換算するため parentH を保持
+  double _sheetParentH = 0.0;
 
   // 逸脱判定調査用ログバッファ。最新200行保持。アプリ内ログ画面で表示。
   // 公開版にも入れて常時収集（メモリ消費は微小）。表示のオン/オフは _debugLogEnabled で制御。
@@ -185,8 +264,45 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     _shareLocation = false;
     WakelockPlus.enable();
+    // Phase C-1: 音声案内サービス初期化（fire-and-forget。完了前の speak は no-op）
+    // 完了後に setState することで、シート上のトグル Switch が永続化済の状態を反映する
+    TtsService.instance.init().then((_) {
+      if (mounted) setState(() {});
+    });
+    // 2D/3D モード復元（fire-and-forget。未設定/読込前は 2D デフォルト）
+    SharedPreferences.getInstance().then((p) {
+      final v = p.getString(_kMapTiltModeKey);
+      if (mounted) setState(() => _is3D = (v == '3D'));
+    });
+    // Phase B-5: 自車マーカー位置の補間用 AnimationController。
+    // GPS 受信ごとに duration 500ms で _animFrom → _animTo へ tween。
+    // listener 内で _displayMyPosition を更新し、_markers の自車だけ高速差替え。
+    _markerAnimController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 500),
+    )..addListener(_onMarkerAnimTick);
     _initAll();
     _loadBannerAd();
+  }
+
+  // Phase B-5: アニメーション tick ごとに自車マーカー位置を更新。
+  // フル _rebuildMarkers は呼ばず、Set 内の自車エントリだけ position を差し替える同期処理。
+  void _onMarkerAnimTick() {
+    if (!mounted) return;
+    final t = _markerAnimController?.value ?? 1.0;
+    final lat = _animFrom.latitude + (_animTo.latitude - _animFrom.latitude) * t;
+    final lng = _animFrom.longitude + (_animTo.longitude - _animFrom.longitude) * t;
+    _displayMyPosition = LatLng(lat, lng);
+    final myUid = widget.userId;
+    final updated = <Marker>{};
+    for (final m in _markers) {
+      if (m.markerId.value == myUid) {
+        updated.add(m.copyWith(positionParam: _displayMyPosition));
+      } else {
+        updated.add(m);
+      }
+    }
+    setState(() => _markers = updated);
   }
 
   @override
@@ -378,6 +494,44 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     );
   }
 
+  /// 退出ボタン押下時の確認ダイアログ。OK 時のみ _exitToLogin を呼ぶ。
+  /// barrierDismissible: true で背景タップ・キャンセルともに退出しない。
+  Future<void> _confirmExitToLogin() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      barrierDismissible: true,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF0D1B2A),
+        title: const Text(
+          'ルームから退出しますか？',
+          style: TextStyle(color: Colors.white, fontSize: 16),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text(
+              'キャンセル',
+              style: TextStyle(color: Colors.grey),
+            ),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text(
+              '退出',
+              style: TextStyle(
+                color: Color(0xFFFF453A), // iOS systemRed（destructive）
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true) {
+      await _exitToLogin();
+    }
+  }
+
   Future<void> _initAppLinks() async {
     try {
       final initialLink = await _appLinks.getInitialLink();
@@ -456,6 +610,9 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
           _routePreference = 'highway';
           _isRoutePreview = false;
           _isShared = false;
+          _waypoints.clear();
+          _waypointNames.clear();
+          _waypointSaidNear.clear();
         });
         _updateDestinationMarker();
         return;
@@ -474,6 +631,36 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       if (lat == null || lng == null) return;
       final newDest = LatLng(lat, lng);
       if (senderUid != widget.userId) {
+        // M-1 経由地共有: waypoints を List/Map 両形式でパース
+        // （Firebase Realtime DB は List を numeric-keyed Map として保存することがある）
+        final newWaypoints = <LatLng>[];
+        final newWaypointNames = <String>[];
+        void parseWp(dynamic wp) {
+          if (wp is! Map) return;
+          final wlat = (wp['lat'] as num?)?.toDouble();
+          final wlng = (wp['lng'] as num?)?.toDouble();
+          final wname = wp['name'] as String? ?? '経由地';
+          if (wlat != null && wlng != null) {
+            newWaypoints.add(LatLng(wlat, wlng));
+            newWaypointNames.add(wname);
+          }
+        }
+        final wpsRaw = data['waypoints'];
+        if (wpsRaw is List) {
+          for (final wp in wpsRaw) {
+            parseWp(wp);
+          }
+        } else if (wpsRaw is Map) {
+          final entries = wpsRaw.entries.toList()
+            ..sort((a, b) {
+              final ai = int.tryParse(a.key.toString()) ?? 0;
+              final bi = int.tryParse(b.key.toString()) ?? 0;
+              return ai.compareTo(bi);
+            });
+          for (final e in entries) {
+            parseWp(e.value);
+          }
+        }
         // 他メンバーが共有した目的地を受信したらプレビューを強制解除し、
         // Firebase 同期済み状態に遷移（_isShared=true）
         setState(() {
@@ -481,6 +668,15 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
           _groupDestName = name;
           _isRoutePreview = false;
           _isShared = true;
+          _waypoints
+            ..clear()
+            ..addAll(newWaypoints);
+          _waypointNames
+            ..clear()
+            ..addAll(newWaypointNames);
+          _waypointSaidNear
+            ..clear()
+            ..addAll(List.filled(newWaypoints.length, false));
         });
         _updateDestinationMarker();
         _saveDestHistory(name, lat, lng);
@@ -957,9 +1153,11 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       final isMe = uid == widget.userId;
       final icon = await _getVehicleMarker(vehicleType, isMe, nick);
       final stale = !isMe && _isStale(m);
+      // Phase B-5: 自車だけ補間後の表示位置を使う（ジャンプを tween で滑らかに見せる）
+      final pos = isMe ? _displayMyPosition : LatLng(lat, lng);
       newMarkers.add(Marker(
         markerId: MarkerId(uid),
-        position: LatLng(lat, lng),
+        position: pos,
         icon: icon,
         // Phase A-6: 画像 144x104 のうち円中心(72,32)を地点位置にアンカー
         // 32/104 ≈ 0.308。これでラベル分のズレを補正
@@ -976,6 +1174,19 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
         position: _groupDestination!,
         icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueBlue),
         infoWindow: InfoWindow(title: _groupDestName),
+      ));
+    }
+
+    // M-1d: 経由地マーカー（hueOrange、目的地の hueBlue と区別）
+    for (int i = 0; i < _waypoints.length; i++) {
+      newMarkers.add(Marker(
+        markerId: MarkerId('waypoint_$i'),
+        position: _waypoints[i],
+        icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueOrange),
+        infoWindow: InfoWindow(
+          title: _waypointNames[i],
+          snippet: '経由地 ${i + 1}',
+        ),
       ));
     }
 
@@ -1004,6 +1215,150 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
 
   // ── ここまで警告ポイント ───────────────────────────────────────
 
+  /// M-1e fix: 経由地モードで SearchScreen を起動し、結果に応じて
+  /// 経由地追加 / 経由地全クリアを実行する。
+  Future<void> _addWaypointFromSearch() async {
+    if (!mounted) return;
+    final result = await Navigator.push<SearchResultAction>(
+      context,
+      MaterialPageRoute(builder: (_) => SearchScreen(
+        currentPosition: _myPosition,
+        hasGpsFix: _hasGpsFix,
+        history: const [],
+        hasActiveDestination: false,
+        hasActiveRoute: true,
+        waypointCount: _waypoints.length,
+        isWaypointMode: true,
+        placesApiKey: 'AIzaSyChuUZypiVhojgCO6ZgZML-ZW3eYLtti5c',
+      )),
+    );
+    if (!mounted || result == null) return;
+    if (result.type == 'waypoint') {
+      await _addWaypoint(LatLng(result.lat!, result.lng!), result.name!);
+    } else if (result.type == 'clear_waypoints') {
+      await _clearWaypoints();
+    }
+  }
+
+  /// M-1e fix: 経由地を全クリアしてルート再計算。
+  Future<void> _clearWaypoints() async {
+    if (_waypoints.isEmpty) return;
+    setState(() {
+      _waypoints.clear();
+      _waypointNames.clear();
+      _waypointSaidNear.clear();
+    });
+    _rebuildMarkers();
+    if (_groupDestination != null) {
+      await _fetchRoute(_groupDestination!, isRerouting: true, force: true);
+    }
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('経由地をクリアしました'),
+          backgroundColor: Color(0xFF1A3A5C),
+          duration: Duration(seconds: 2),
+        ),
+      );
+    }
+  }
+
+  /// M-1d: 経由地を末尾に追加してルート再計算 + マーカー更新。
+  /// 呼出側で _groupDestination != null を保証する（ボタンの活性条件で担保済）。
+  Future<void> _addWaypoint(LatLng latLng, String name) async {
+    final destBefore = _groupDestination;
+    _appendDebugLog(
+      '[経由地追加] before: dest=${destBefore?.latitude.toStringAsFixed(4)},'
+      '${destBefore?.longitude.toStringAsFixed(4)} waypoints=${_waypoints.length}',
+    );
+    if (_groupDestination == null) {
+      _appendDebugLog('[経由地追加] スキップ: _groupDestination が null');
+      return;
+    }
+    setState(() {
+      _waypoints.add(latLng);
+      _waypointNames.add(name);
+      _waypointSaidNear.add(false);
+    });
+    _rebuildMarkers();              // 経由地マーカーを即時表示
+    // 経由地追加はリルート扱い：カメラ広域動作・選択index リセット・5秒タイマー等の
+    // 「新規目的地検索」副作用を回避し、ナビ/プレビューの state を保全する。
+    // step/voice state は新ルート向けに自動リセットされ整合。force=true で
+    // _rerouteInFlight 中でも確実に反映。
+    await _fetchRoute(_groupDestination!, isRerouting: true, force: true);
+    if (mounted) {
+      _rebuildMarkers();            // 防御的: fetch 完了後の最終状態でも再描画
+      _appendDebugLog(
+        '[経由地追加] after: dest=${_groupDestination?.latitude.toStringAsFixed(4)},'
+        '${_groupDestination?.longitude.toStringAsFixed(4)} waypoints=${_waypoints.length}',
+      );
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('経由地「$name」を追加しました'),
+          backgroundColor: const Color(0xFF1A3A5C),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    }
+  }
+
+  /// 目的地到着時の状態クリーンアップ。「案内終了」と同等のリセット + SnackBar。
+  /// 音声「目的地に到着しました」は呼出側で既に流す前提。
+  void _onDestinationArrived() {
+    _routeOverviewTimer?.cancel();
+    setState(() {
+      _groupDestination = null;
+      _groupDestName = '';
+      _polylines = {};
+      _routes = [];
+      _selectedRouteIndex = 0;
+      _headingUp = false;
+      _isRoutePreview = false;
+      _isShared = false;
+      _inRouteOverview = false;
+      _waypoints.clear();
+      _waypointNames.clear();
+      _waypointSaidNear.clear();
+    });
+    _animateCameraWithBearing(_myPosition, 0);
+    _rebuildMarkers();
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('🎯 目的地に到着しました'),
+          backgroundColor: Color(0xFF1A3A5C),
+          duration: Duration(seconds: 3),
+        ),
+      );
+    }
+  }
+
+  /// 経由地通過判定。GPS 更新ごとに呼ぶ。
+  /// _waypoints[0]（次の経由地）への直線距離で判定:
+  /// - 100m 以内かつ未発話: 「まもなく経由地」（経由地ごとに 1 回）
+  /// - 30m 以内: 「経由地です」+ 該当経由地除外 + マーカー再描画
+  /// ルート再計算は行わない（既存ポリラインの後続部分で継続）。
+  void _checkWaypointArrival() {
+    if (_waypoints.isEmpty || _isRoutePreview) return;
+    final dist = _metersTo(_myPosition, _waypoints[0]);
+    if (dist < 30) {
+      final name = _waypointNames[0];
+      setState(() {
+        _waypoints.removeAt(0);
+        _waypointNames.removeAt(0);
+        if (_waypointSaidNear.isNotEmpty) _waypointSaidNear.removeAt(0);
+      });
+      _rebuildMarkers();
+      TtsService.instance.speak('経由地です');
+      _appendDebugLog('[経由地通過] $name / 残${_waypoints.length}');
+      return;
+    }
+    if (dist < 100 && _waypointSaidNear.isNotEmpty && !_waypointSaidNear[0]) {
+      setState(() => _waypointSaidNear[0] = true);
+      TtsService.instance.speak('まもなく経由地');
+    }
+  }
+
   void _updateDestinationMarker() {
     final dest = _activeDestination;
     if (dest != null) {
@@ -1022,7 +1377,12 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     _rebuildMarkers();
   }
 
-  Future<bool> _fetchRoute(LatLng dest, {bool isRerouting = false, bool force = false}) async {
+  Future<bool> _fetchRoute(
+    LatLng dest, {
+    bool isRerouting = false,
+    bool force = false,
+    bool addAntiUTurnWaypoint = false,
+  }) async {
     if (isRerouting && !force && _rerouteInFlight) return false;
     if (isRerouting) _rerouteInFlight = true;
 
@@ -1033,9 +1393,27 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       final origin = '${_myPosition.latitude},${_myPosition.longitude}';
       final destination = '${dest.latitude},${dest.longitude}';
       final avoidParam = _routePreference == 'local' ? '&avoid=highways' : '';
+
+      // Uターン回避: B-6/B-7 自動再検索時のみ、進行方向に少し先の点を via waypoint として追加。
+      // via: プレフィックスで停車地扱いを回避（leg 分割を起こさず単一 leg のまま）。
+      // M-1d: ユーザー追加経由地（_waypoints）も同様に via: で連結。順序: anti-U-turn → user[0..n]。
+      final wpList = <String>[];
+      if (addAntiUTurnWaypoint && _currentSpeed >= _waypointMinSpeedMps) {
+        final offsetMeters = _currentSpeed * _waypointLookaheadSec;
+        final wp = _destinationLatLng(_myPosition, _currentBearing, offsetMeters);
+        wpList.add('via:${wp.latitude},${wp.longitude}');
+        _appendDebugLog(
+          '[再検索waypoint] +${offsetMeters.toStringAsFixed(0)}m 方位${_currentBearing.toStringAsFixed(0)}° → ${wp.latitude.toStringAsFixed(5)},${wp.longitude.toStringAsFixed(5)}',
+        );
+      }
+      for (final userWp in _waypoints) {
+        wpList.add('via:${userWp.latitude},${userWp.longitude}');
+      }
+      final waypointParam = wpList.isEmpty ? '' : '&waypoints=${wpList.join('|')}';
+
       final url = 'https://maps.googleapis.com/maps/api/directions/json'
           '?origin=$origin&destination=$destination'
-          '&mode=driving&language=ja&alternatives=true$avoidParam&key=$apiKey';
+          '&mode=driving&language=ja&alternatives=true$avoidParam$waypointParam&key=$apiKey';
       final client = HttpClient();
       try {
         final request = await client.getUrl(Uri.parse(url));
@@ -1052,20 +1430,49 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
             final summary = (routesJson[i]['summary'] as String?) ?? '';
             final duration = (leg['duration']['text'] as String?) ?? '';
             final distance = (leg['distance']['text'] as String?) ?? '';
+            final durationSec = (leg['duration']['value'] as num?)?.toInt() ?? 0;
+            final distanceMet = (leg['distance']['value'] as num?)?.toInt() ?? 0;
             debugPrint('[Phase1]   [$i] summary="$summary" / $duration / $distance');
-            final steps = leg['steps'] as List;
-            final coords = <LatLng>[];
-            for (final step in steps) {
+            final stepsJson = leg['steps'] as List;
+            final stepsList = <_RouteStep>[];
+            for (final step in stepsJson) {
               final encoded = step['polyline']['points'] as String;
               final pts = PolylinePoints.decodePolyline(encoded);
-              coords.addAll(pts.map((p) => LatLng(p.latitude, p.longitude)));
+              final stepPoints = pts.map((p) => LatLng(p.latitude, p.longitude)).toList();
+              if (stepPoints.isEmpty) continue;
+              final htmlInst = (step['html_instructions'] as String?) ?? '';
+              final maneuver = step['maneuver'] as String?;
+              final stepDistText = (step['distance']?['text'] as String?) ?? '';
+              final stepDistVal = (step['distance']?['value'] as num?)?.toInt() ?? 0;
+              final stepDurVal = (step['duration']?['value'] as num?)?.toInt() ?? 0;
+              final startLoc = step['start_location'];
+              final endLoc = step['end_location'];
+              final start = startLoc != null
+                  ? LatLng((startLoc['lat'] as num).toDouble(), (startLoc['lng'] as num).toDouble())
+                  : stepPoints.first;
+              final end = endLoc != null
+                  ? LatLng((endLoc['lat'] as num).toDouble(), (endLoc['lng'] as num).toDouble())
+                  : stepPoints.last;
+              stepsList.add(_RouteStep(
+                points: stepPoints,
+                htmlInstructions: htmlInst,
+                plainInstructions: _stripHtmlTags(htmlInst),
+                maneuver: maneuver,
+                distanceMeters: stepDistVal,
+                durationSeconds: stepDurVal,
+                distanceText: stepDistText,
+                startLocation: start,
+                endLocation: end,
+              ));
             }
-            if (coords.isNotEmpty) {
+            if (stepsList.isNotEmpty) {
               newRoutes.add(_Route(
-                points: coords,
+                steps: stepsList,
                 summary: summary,
                 durationText: duration,
                 distanceText: distance,
+                durationSeconds: durationSec,
+                distanceMeters: distanceMet,
               ));
             }
           }
@@ -1077,6 +1484,14 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                 if (_selectedRouteIndex >= newRoutes.length) {
                   _selectedRouteIndex = 0;
                 }
+                // 再検索でルート構造が変わるため step / 音声 state をリセット。
+                // 残したままだと _lastVoiceStepIdx が新ルートの step と偶然一致して
+                // 「step 突入」と判定されず音声案内が完全に鳴らないケースがある。
+                _currentStepIndex = 0;
+                _pendingStepIndex = null;
+                _pendingSince = null;
+                _lastVoiceStepIdx = -1;
+                _announcedTiers = <int>{};
               } else {
                 _selectedRouteIndex = 0;
               }
@@ -1099,21 +1514,23 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
             if (!isRerouting) {
               // 前回のタイマーをキャンセル（5秒以内の再設定時の競合防止）
               _routeOverviewTimer?.cancel();
-              // 縮退チェック（現在地と目的地が同じ場合は概観スキップ）
-              final isSamePoint = (_myPosition.latitude - dest.latitude).abs() < 0.00001 &&
+              // 縮退チェック（現在地と目的地が同じ + 経由地無し の場合のみ概観スキップ）
+              final isSamePoint = _waypoints.isEmpty &&
+                  (_myPosition.latitude - dest.latitude).abs() < 0.00001 &&
                   (_myPosition.longitude - dest.longitude).abs() < 0.00001;
               if (isSamePoint) {
                 _animateCamera(CameraUpdate.newLatLngZoom(_myPosition, 17.0), programmatic: true);
               } else {
-                // 現在地と目的地が両方見えるようズームアウト
+                // M-1d fix: bounds に waypoints も含めて全マーカーが画面に収まるように
+                final allPts = [_myPosition, dest, ..._waypoints];
                 final bounds = LatLngBounds(
                   southwest: LatLng(
-                    min(_myPosition.latitude, dest.latitude),
-                    min(_myPosition.longitude, dest.longitude),
+                    allPts.map((p) => p.latitude).reduce(min),
+                    allPts.map((p) => p.longitude).reduce(min),
                   ),
                   northeast: LatLng(
-                    max(_myPosition.latitude, dest.latitude),
-                    max(_myPosition.longitude, dest.longitude),
+                    allPts.map((p) => p.latitude).reduce(max),
+                    allPts.map((p) => p.longitude).reduce(max),
                   ),
                 );
                 _inRouteOverview = true;
@@ -1213,163 +1630,56 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   // ── ここまで目的地履歴 ────────────────────────────────────────
 
   Future<void> _setPersonalDestination() async {
-    final TextEditingController searchCtrl = TextEditingController();
-    List<Map<String, dynamic>> searchResults = [];
-    List<Map<String, dynamic>> history = await _loadDestHistory();
-    bool isSearching = false;
-    const placesApiKey = 'AIzaSyChuUZypiVhojgCO6ZgZML-ZW3eYLtti5c';
-
-    void selectDest(BuildContext ctx, String name, double lat, double lng) {
+    final history = await _loadDestHistory();
+    if (!mounted) return;
+    final result = await Navigator.push<SearchResultAction>(
+      context,
+      MaterialPageRoute(builder: (_) => SearchScreen(
+        currentPosition: _myPosition,
+        hasGpsFix: _hasGpsFix,
+        history: history,
+        hasActiveDestination: _groupDestination != null,
+        hasActiveRoute: _routes.isNotEmpty,
+        placesApiKey: 'AIzaSyChuUZypiVhojgCO6ZgZML-ZW3eYLtti5c',
+      )),
+    );
+    if (!mounted || result == null) return;
+    if (result.type == 'destination') {
       setState(() {
-        _groupDestination = LatLng(lat, lng);
-        _groupDestName = name;
+        _groupDestination = LatLng(result.lat!, result.lng!);
+        _groupDestName = result.name!;
         _isRoutePreview = true;
         // 新規目的地検索時は「高速優先」にリセット。
-        // 前回「下道優先」のまま検索すると意図せず狭い道が選ばれることがあるため。
+        // 前回「一般道優先」のまま検索すると意図せず狭い道が選ばれることがあるため。
         _routePreference = 'highway';
+        // M-1d: 新目的地で経由地もリセット（前ルートの経由地は意味を失う）
+        _waypoints.clear();
+        _waypointNames.clear();
+        _waypointSaidNear.clear();
       });
       _updateDestinationMarker();
-      _saveDestHistory(name, lat, lng);
-      Navigator.pop(ctx);
+      // 「現在地」は履歴に保存しない（既存挙動踏襲）
+      if (result.name != '現在地') {
+        _saveDestHistory(result.name!, result.lat!, result.lng!);
+      }
+    } else if (result.type == 'waypoint') {
+      // M-1d: 経由地として追加
+      await _addWaypoint(
+        LatLng(result.lat!, result.lng!),
+        result.name!,
+      );
+    } else if (result.type == 'reset') {
+      setState(() {
+        _groupDestination = null;
+        _groupDestName = '';
+        _isRoutePreview = false;
+        _isShared = false;
+        _waypoints.clear();
+        _waypointNames.clear();
+        _waypointSaidNear.clear();
+      });
+      _updateDestinationMarker();
     }
-
-    if (!mounted) return;
-    await showDialog(
-      context: context,
-      barrierDismissible: true,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setStateDialog) => AlertDialog(
-          // 横画面（縦の利用可能領域が狭い）でも検索結果と「現在地を目的地に設定」が
-          // 全部見えるよう、ダイアログ全体を縦スクロール可能にする
-          scrollable: true,
-          backgroundColor: const Color(0xFF0D1B2A),
-          title: const Text('🔍 目的地を検索', style: TextStyle(color: Colors.white)),
-          content: SizedBox(
-            width: double.maxFinite,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                TextField(
-                  controller: searchCtrl,
-                  style: const TextStyle(color: Colors.white),
-                  autofocus: true,
-                  decoration: InputDecoration(
-                    hintText: '場所・お店・住所を検索...',
-                    hintStyle: const TextStyle(color: Colors.grey),
-                    prefixIcon: const Icon(Icons.search, color: Color(0xFF00D4FF)),
-                    suffixIcon: isSearching
-                        ? const SizedBox(width: 20, height: 20, child: Padding(padding: EdgeInsets.all(12), child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFF00D4FF))))
-                        : null,
-                    enabledBorder: const UnderlineInputBorder(borderSide: BorderSide(color: Colors.grey)),
-                    focusedBorder: const UnderlineInputBorder(borderSide: BorderSide(color: Color(0xFF00D4FF))),
-                  ),
-                  onChanged: (val) async {
-                    if (val.length < 2) {
-                      setStateDialog(() => searchResults = []);
-                      return;
-                    }
-                    setStateDialog(() => isSearching = true);
-                    try {
-                      final encoded = Uri.encodeComponent(val);
-                      final url = 'https://maps.googleapis.com/maps/api/place/textsearch/json?query=$encoded&language=ja&region=jp&key=$placesApiKey';
-                      final client = HttpClient();
-                      try {
-                        final request = await client.getUrl(Uri.parse(url));
-                        final response = await request.close();
-                        final body = await response.transform(const Utf8Decoder()).join();
-                        final data = jsonDecode(body);
-                        if (data['status'] == 'OK') {
-                          final results = (data['results'] as List).take(5).map((r) {
-                            final loc = r['geometry']['location'];
-                            return {
-                              'name': r['name'] as String,
-                              'address': r['formatted_address'] as String? ?? '',
-                              'lat': (loc['lat'] as num).toDouble(),
-                              'lng': (loc['lng'] as num).toDouble(),
-                            };
-                          }).toList();
-                          setStateDialog(() {
-                            searchResults = List<Map<String, dynamic>>.from(results);
-                            isSearching = false;
-                          });
-                        } else {
-                          setStateDialog(() { searchResults = []; isSearching = false; });
-                        }
-                      } finally {
-                        client.close();
-                      }
-                    } catch (e) {
-                      setStateDialog(() { searchResults = []; isSearching = false; });
-                    }
-                  },
-                ),
-                // 履歴（検索結果がないときだけ表示）
-                if (searchResults.isEmpty && history.isNotEmpty) ...[
-                  const SizedBox(height: 10),
-                  Row(children: [
-                    const Icon(Icons.history, color: Colors.grey, size: 14),
-                    const SizedBox(width: 4),
-                    const Text('最近の目的地', style: TextStyle(color: Colors.grey, fontSize: 11)),
-                  ]),
-                  const SizedBox(height: 4),
-                  ...history.map((h) => ListTile(
-                    dense: true,
-                    contentPadding: EdgeInsets.zero,
-                    leading: const Icon(Icons.history, color: Color(0xFF6680AA), size: 18),
-                    title: Text(h['name'] as String, style: const TextStyle(color: Colors.white70, fontSize: 13)),
-                    onTap: () => selectDest(ctx, h['name'] as String, h['lat'] as double, h['lng'] as double),
-                  )),
-                ],
-                const SizedBox(height: 4),
-                // 検索結果は最大5件のため Column に展開（AlertDialog.scrollable=true との競合回避）
-                if (searchResults.isNotEmpty)
-                  ...searchResults.map((r) => ListTile(
-                        leading: const Icon(Icons.place, color: Color(0xFF00D4FF)),
-                        title: Text(r['name'], style: const TextStyle(color: Colors.white, fontSize: 14)),
-                        subtitle: Text(r['address'], style: const TextStyle(color: Colors.grey, fontSize: 11), maxLines: 1, overflow: TextOverflow.ellipsis),
-                        onTap: () => selectDest(ctx, r['name'] as String, r['lat'] as double, r['lng'] as double),
-                      )),
-                const SizedBox(height: 4),
-                TextButton.icon(
-                  icon: const Icon(Icons.my_location, color: Color(0xFF00D4FF), size: 18),
-                  label: const Text('現在地を目的地に設定', style: TextStyle(color: Color(0xFF00D4FF))),
-                  onPressed: () {
-                    setState(() {
-                      _groupDestination = _myPosition;
-                      _groupDestName = '現在地';
-                      _isRoutePreview = true;
-                      _routePreference = 'highway';
-                    });
-                    _updateDestinationMarker();
-                    Navigator.pop(ctx);
-                  },
-                ),
-              ],
-            ),
-          ),
-          actions: [
-            if (_groupDestination != null)
-              TextButton(
-                onPressed: () {
-                  setState(() {
-                    _groupDestination = null;
-                    _groupDestName = '';
-                    _isRoutePreview = false;
-                    _isShared = false;
-                  });
-                  _updateDestinationMarker();
-                  Navigator.pop(ctx);
-                },
-                child: const Text('目的地をリセット', style: TextStyle(color: Colors.redAccent)),
-              ),
-            TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text('キャンセル', style: TextStyle(color: Colors.grey)),
-            ),
-          ],
-        ),
-      ),
-    );
   }
 
   Future<void> _shareGroupDestination() async {
@@ -1392,6 +1702,12 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       'senderNick': widget.nickname,
       'shared_at': DateTime.now().millisecondsSinceEpoch,
       'routePreference': _routePreference,
+      // M-1 経由地共有: 各 waypoint を {lat, lng, name} で書込。経由地ゼロ時は空配列
+      'waypoints': List.generate(_waypoints.length, (i) => {
+        'lat': _waypoints[i].latitude,
+        'lng': _waypoints[i].longitude,
+        'name': _waypointNames[i],
+      }),
     });
     if (mounted) {
       setState(() => _isShared = true);
@@ -1445,10 +1761,13 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   }
 
   LocationSettings _buildLocationSettings() {
+    // Phase B-5: ナビ最適化（高頻度・高精度。バッテリー消費は許容）
     if (Platform.isAndroid) {
       return AndroidSettings(
-        accuracy: LocationAccuracy.high,
-        intervalDuration: const Duration(seconds: 2),
+        accuracy: LocationAccuracy.bestForNavigation,
+        intervalDuration: const Duration(milliseconds: 500),
+        // ジッタ抑制のため最小移動量は控えめに（0 にすると静止時もイベントが連発する）
+        distanceFilter: 0,
         foregroundNotificationConfig: const ForegroundNotificationConfig(
           notificationText: 'バックグラウンドで位置情報を更新中',
           notificationTitle: 'TouriLink',
@@ -1457,56 +1776,81 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       );
     } else if (Platform.isIOS) {
       return AppleSettings(
-        accuracy: LocationAccuracy.high,
+        accuracy: LocationAccuracy.bestForNavigation,
         activityType: ActivityType.automotiveNavigation,
         pauseLocationUpdatesAutomatically: false,
         allowBackgroundLocationUpdates: true,
         showBackgroundLocationIndicator: true,
+        distanceFilter: 0,
       );
     }
     return const LocationSettings(
-      accuracy: LocationAccuracy.high,
-      distanceFilter: 5,
+      accuracy: LocationAccuracy.bestForNavigation,
+      distanceFilter: 0,
     );
   }
 
   void _startLocationStream() {
     _locationSubscription = Geolocator.getPositionStream(
       locationSettings: _buildLocationSettings(),
-    ).listen((pos) async {
-      if (!mounted) return;
-      setState(() => _myPosition = LatLng(pos.latitude, pos.longitude));
-      final spd = pos.speed;
-      // 負値（取得不可）は 0 扱い。bearing ガードの外で常に更新
-      _currentSpeed = spd > 0 ? spd : 0.0;
-      // 速度が十分な場合のみbearingを更新（停車中の誤検知を防ぐ）
-      if (spd > 0.5 && pos.heading >= 0) {
-        _currentBearing = pos.heading;
-      }
-      if (_shareLocation) {
-        await _db.child('rooms/${widget.roomCode}/members/${widget.userId}').update({
-          'nickname': widget.nickname,
-          'lat': pos.latitude,
-          'lng': pos.longitude,
-          'vehicle_type': widget.vehicleType,
-          'last_seen': DateTime.now().millisecondsSinceEpoch,
-        });
-      }
-      if (!mounted) return;
-      // 追従停止中（_isFollowingMember==true）はヘディングアップでもカメラを動かさない
-      if (!_inRouteOverview && !_isFollowingMember) {
-        if (_headingUp) {
-          _moveCameraWithBearing(_myPosition, _currentBearing);
-        } else {
-          _animateCamera(CameraUpdate.newLatLng(_myPosition), programmatic: true);
-        }
-      }
-      _checkRouteDeviation();
-      _updatePassedRoute();
-    }, onError: (e) {
-      debugPrint('位置情報ストリームエラー: $e');
-    });
+    ).listen(
+      _handlePositionUpdate,
+      onError: (e) => debugPrint('位置情報ストリームエラー: $e'),
+    );
   }
+
+  Future<void> _handlePositionUpdate(Position pos) async {
+    if (!mounted) return;
+    final newPos = LatLng(pos.latitude, pos.longitude);
+    // Phase B-5: 自車マーカーの tween を駆動（生 _myPosition は別途 setState で更新）
+    // 初回はデフォルト東京座標から長距離 tween しないようスナップ。
+    if (!_hasFirstFix) {
+      _hasFirstFix = true;
+      _displayMyPosition = newPos;
+      _animFrom = newPos;
+      _animTo = newPos;
+    } else {
+      _animFrom = _displayMyPosition;
+      _animTo = newPos;
+      _markerAnimController?.forward(from: 0);
+    }
+    setState(() => _myPosition = newPos);
+    _hasGpsFix = true;
+    final spd = pos.speed;
+    // 負値（取得不可）は 0 扱い。bearing ガードの外で常に更新
+    _currentSpeed = spd > 0 ? spd : 0.0;
+    // Phase F-1: 速度 >= 2km/h の時のみ bearing 更新（停車・徐行で画面回転を抑止）。
+    // 走り出したら自動で反映再開、ヘディングアップで自然に追従する。
+    if (spd > _bearingUpdateMinSpeedMps && pos.heading >= 0) {
+      _currentBearing = pos.heading;
+    }
+    if (_shareLocation) {
+      await _db.child('rooms/${widget.roomCode}/members/${widget.userId}').update({
+        'nickname': widget.nickname,
+        'lat': pos.latitude,
+        'lng': pos.longitude,
+        'vehicle_type': widget.vehicleType,
+        'last_seen': DateTime.now().millisecondsSinceEpoch,
+      });
+    }
+    if (!mounted) return;
+    // 追従停止中（_isFollowingMember==true）はヘディングアップでもカメラを動かさない
+    if (!_inRouteOverview && !_isFollowingMember) {
+      if (_headingUp) {
+        _moveCameraWithBearing(_myPosition, _currentBearing);
+      } else {
+        _animateCamera(CameraUpdate.newLatLng(_myPosition), programmatic: true);
+      }
+    }
+    _checkRouteDeviation();
+    _updatePassedRoute();
+    _updateCurrentStep(); // B-2: ステップ判定（投影方式 + 3秒デバウンス）
+    _updateReverseDetection(); // B-6: 逆走検知（_currentStepIndex を使うため後）
+    _checkWaypointArrival(); // M-1d: 経由地通過判定（音声 + マーカー除去）
+    _updateVoiceGuidance(); // C-2: 音声案内（500/100/30m tier で読み上げ）
+    _updateRemainingDistanceCheck(); // B-7: 残り距離増加検知（90° ズレ補完）
+  }
+
 
   Future<void> _updateLocation() async {
     if (_updateLocationInProgress) return;
@@ -1524,7 +1868,20 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       }
       final pos = await Geolocator.getCurrentPosition();
       if (!mounted) return;
-      setState(() => _myPosition = LatLng(pos.latitude, pos.longitude));
+      final newPos = LatLng(pos.latitude, pos.longitude);
+      // Phase B-5: 単発取得でも first-fix なら表示位置をスナップしておく
+      if (!_hasFirstFix) {
+        _hasFirstFix = true;
+        _displayMyPosition = newPos;
+        _animFrom = newPos;
+        _animTo = newPos;
+      } else {
+        _animFrom = _displayMyPosition;
+        _animTo = newPos;
+        _markerAnimController?.forward(from: 0);
+      }
+      setState(() => _myPosition = newPos);
+      _hasGpsFix = true;
       if (_shareLocation) {
         await _db.child('rooms/${widget.roomCode}/members/${widget.userId}').update({
           'nickname': widget.nickname,
@@ -1594,7 +1951,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     if (dist > threshold) {
       debugPrint('[逸脱] 検知 → 再検索');
       _appendDebugLog('[逸脱] 検知 → 再検索');
-      _fetchRoute(_groupDestination!, isRerouting: true);
+      _fetchRoute(_groupDestination!, isRerouting: true, addAntiUTurnWaypoint: true);
     }
   }
 
@@ -1623,6 +1980,373 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     return sqrt(pow(px - t * dx, 2) + pow(py - t * dy, 2));
   }
 
+  /// Phase B-2: ナビ中の現在 step を判定。投影方式（最近接セグメント）。
+  /// 全 step の polyline 線分への垂線距離が最小のものを採用。
+  /// step 数は通常 10〜30 程度なので O(N×M) 線形探索で問題無し。
+  int _findClosestStepIndex(LatLng pos, List<_RouteStep> steps) {
+    if (steps.isEmpty) return 0;
+    int bestStep = 0;
+    double bestDist = double.infinity;
+    for (int i = 0; i < steps.length; i++) {
+      final pts = steps[i].points;
+      if (pts.length < 2) continue;
+      for (int j = 0; j < pts.length - 1; j++) {
+        final d = _distanceToSegment(pos, pts[j], pts[j + 1]);
+        if (d < bestDist) {
+          bestDist = d;
+          bestStep = i;
+        }
+      }
+    }
+    return bestStep;
+  }
+
+  /// Phase B-2: 位置更新時に呼ぶ。最近接 step を求め、3秒間連続で同じ候補が
+  /// 出続けた場合のみ切替確定（GPS ジッタ・分岐点での誤判定を吸収）。
+  /// プレビュー中 / ルート無し時は state をリセット。setState はしない（B-3 で UI と連携時に対応）。
+  void _updateCurrentStep() {
+    if (_isRoutePreview || _routes.isEmpty) {
+      if (_currentStepIndex != 0 || _pendingStepIndex != null) {
+        _currentStepIndex = 0;
+        _pendingStepIndex = null;
+        _pendingSince = null;
+      }
+      return;
+    }
+    if (_selectedRouteIndex < 0 || _selectedRouteIndex >= _routes.length) return;
+    final steps = _routes[_selectedRouteIndex].steps;
+    if (steps.isEmpty) return;
+
+    final candidate = _findClosestStepIndex(_myPosition, steps);
+
+    if (candidate == _currentStepIndex) {
+      // 候補が現 step と同じ → debounce 状態をクリア
+      _pendingStepIndex = null;
+      _pendingSince = null;
+      return;
+    }
+
+    if (_pendingStepIndex != candidate) {
+      // 新しい候補出現
+      _pendingStepIndex = candidate;
+      _pendingSince = DateTime.now();
+      return;
+    }
+
+    // 同じ候補が継続 → 経過時間チェック
+    if (_pendingSince != null &&
+        DateTime.now().difference(_pendingSince!) >= _stepDebounceDuration) {
+      debugPrint('[B-2] step 切替: $_currentStepIndex → $candidate (debounce 3s 経過)');
+      _currentStepIndex = candidate;
+      _pendingStepIndex = null;
+      _pendingSince = null;
+    }
+  }
+
+  /// Phase C-2: 音声案内のトリガー。GPS 更新ごとに呼ぶ。
+  /// 現 step の終了点（次の曲がり地点）までの距離を 500m / 100m / 30m の tier 判定で読み上げ。
+  /// step 切替時：突入時の残距離バンドに応じて 1 メッセージを即時発話（短い step / 再検索後でも
+  /// 必ず 1 発話を担保）。残りの tier は通常通り順次発火。
+  /// keep-* / null（直進）maneuver は発話せずスキップ。1 tick で発火する tier は直近 1 つのみ。
+  void _updateVoiceGuidance() {
+    if (_isRoutePreview || _routes.isEmpty) {
+      _lastVoiceStepIdx = -1;
+      _announcedTiers = <int>{};
+      return;
+    }
+    if (_selectedRouteIndex < 0 || _selectedRouteIndex >= _routes.length) return;
+    final steps = _routes[_selectedRouteIndex].steps;
+    if (steps.isEmpty) return;
+
+    final i = _currentStepIndex.clamp(0, steps.length - 1);
+    final isLast = i >= steps.length - 1;
+
+    // 末尾 step は「目的地」固定、それ以外は次 step の maneuver から日本語生成
+    final String? maneuverJa = isLast
+        ? '目的地'
+        : _maneuverToJa(steps[i + 1].maneuver);
+
+    // step 切替時：突入バンドに応じて即時発話 + 通過済み tier を事前マーク
+    if (i != _lastVoiceStepIdx) {
+      _lastVoiceStepIdx = i;
+      _announcedTiers = <int>{};
+      final initDist = _distanceAlongStepToEnd(_myPosition, steps[i]);
+
+      String? immediateText;
+      Set<int> preMarked = <int>{};
+      if (maneuverJa != null) {
+        if (initDist < 30) {
+          // < 30m: 直前案内を即時発話、以降の tier は全部抑止
+          immediateText = isLast ? '目的地に到着しました' : '$maneuverJaです';
+          preMarked = {500, 100, 30};
+        } else if (initDist < 500) {
+          // 30〜500m: 「まもなく〜」を即時発話、30m tier のみ後で監視
+          immediateText = isLast ? 'まもなく目的地' : 'まもなく$maneuverJa';
+          preMarked = {500, 100};
+        }
+        // initDist >= 500m: 即時発話なし、500/100/30 を順次発火（既存挙動）
+      }
+      _announcedTiers.addAll(preMarked);
+
+      // [調査支援] 即時発話の有無 / 事前スキップ tier を記録
+      final nextManeuver = isLast ? '(末尾step)' : (steps[i + 1].maneuver ?? '(null=直進)');
+      final resolved = maneuverJa ?? '(無音)';
+      _appendDebugLog(
+        '[音声] step=$i / maneuver=$nextManeuver → $resolved'
+        ' / initDist=${initDist.toStringAsFixed(0)}m'
+        ' / 即時発話=${immediateText ?? "なし"}'
+        ' / 事前スキップtier=$preMarked',
+      );
+
+      if (immediateText != null) {
+        TtsService.instance.speak(immediateText);
+        // 末尾 step + 30m 即時発話 = 既に到着 → state リセット
+        if (isLast && initDist < 30) _onDestinationArrived();
+        return; // 即時発話したらこの tick の tier 判定はスキップ
+      }
+    }
+
+    if (maneuverJa == null) return; // keep-* / null（直進）はスキップ
+
+    final distance = _distanceAlongStepToEnd(_myPosition, steps[i]);
+
+    // 直近 1 tier のみ発火（30 を最優先、GPS ジャンプで複数 tier 跨いでも 1 発話に収束）
+    if (distance < 30 && !_announcedTiers.contains(30)) {
+      _announcedTiers.addAll({30, 100, 500});
+      final text = isLast ? '目的地に到着しました' : '$maneuverJaです';
+      TtsService.instance.speak(text);
+      // 末尾 step + 30m 到達 → 目的地到着、state リセット
+      if (isLast) _onDestinationArrived();
+    } else if (distance < 100 && !_announcedTiers.contains(100)) {
+      _announcedTiers.addAll({100, 500});
+      final text = isLast ? 'まもなく目的地' : 'まもなく$maneuverJa';
+      TtsService.instance.speak(text);
+    } else if (distance < 500 && !_announcedTiers.contains(500)) {
+      _announcedTiers.add(500);
+      // 連続交差点の先読み: 直前案内の曲がり後、200m 以内に次の曲がりがあれば追記。
+      // 直進系（_maneuverToJa が null）step は中継として無視し累積距離で判定。
+      // 末尾 step（arrive）は j+1 < length で除外 → 「次は目的地」化を回避。
+      String? lookaheadJa;
+      double lookaheadDist = 0;
+      if (!isLast) {
+        for (int j = i + 1; j + 1 < steps.length; j++) {
+          lookaheadDist += steps[j].distanceMeters.toDouble();
+          if (lookaheadDist > 200) break;
+          final cand = _maneuverToJa(steps[j + 1].maneuver);
+          if (cand != null) {
+            lookaheadJa = cand;
+            break;
+          }
+        }
+      }
+      final String text;
+      if (isLast) {
+        text = '500m先、目的地です';
+      } else if (lookaheadJa != null) {
+        text = '500m先、$maneuverJaです。そのあとすぐ$lookaheadJaです';
+        _appendDebugLog(
+          '[音声] 500m先読み: 現=$maneuverJa / 次=$lookaheadJa'
+          ' / 次step長=${lookaheadDist.toStringAsFixed(0)}m',
+        );
+      } else {
+        text = '500m先、$maneuverJaです';
+      }
+      TtsService.instance.speak(text);
+    }
+  }
+
+  /// Phase B-7: 残り距離が増加していないか監視 → 自動再検索。GPS 更新ごとに呼ぶ。
+  /// 90° ズレ（B-6 の 135° しきい値で検知できない）でルートから離れて残り距離が増えていく
+  /// ケースを 10秒スパンの増減で捕捉。最古サンプル 9秒以上経過時、現在 - 最古 > 100m
+  /// かつ速度 > 5km/h で発火。Cooldown は B-6 と共用。
+  void _updateRemainingDistanceCheck() {
+    if (_isRoutePreview || _routes.isEmpty || _groupDestination == null) {
+      _distSamples.clear();
+      return;
+    }
+    if (_rerouteInFlight) {
+      _distSamples.clear();
+      return;
+    }
+    final now = DateTime.now();
+    if (_lastRerouteTime != null &&
+        now.difference(_lastRerouteTime!).inSeconds < _rerouteCooldownSecs) {
+      _distSamples.clear();
+      return;
+    }
+    final dist = _remainingDistanceMeters();
+    if (dist <= 0) return;
+
+    // 10秒以上古いサンプルを削除
+    _distSamples.removeWhere(
+      (s) => now.difference(s.t) > _distHistoryDuration,
+    );
+
+    // 最古サンプルが 9秒以上経過していれば判定（バッファ未充足は判定スキップ）
+    if (_distSamples.isNotEmpty) {
+      final oldest = _distSamples.first;
+      if (now.difference(oldest.t).inSeconds >= 9) {
+        final increase = dist - oldest.dist;
+        final speedOk = _currentSpeed > _distIncreaseSpeedMps;
+        if (increase > _distIncreaseThresholdMeters && speedOk) {
+          _appendDebugLog(
+            '[B-7] 残り距離増加 → 再検索 +${increase.toStringAsFixed(0)}m 速度=${(_currentSpeed * 3.6).toStringAsFixed(1)}km/h',
+          );
+          _distSamples.clear();
+          _fetchRoute(_groupDestination!, isRerouting: true, addAntiUTurnWaypoint: true);
+          return;
+        }
+      }
+    }
+
+    _distSamples.add(_DistSample(now, dist));
+  }
+
+  /// Phase C-2: maneuver 文字列を音声案内用の日本語へ変換。null は読み上げ対象外。
+  /// fork-* / ramp-* / keep-* は同じ「◯方向」で統一（ランプ・緩い分岐は伝わりにくいため）。
+  /// straight / depart / arrive 系 / 未知 は無音（arrive 系は末尾 step で「目的地」発話される）。
+  String? _maneuverToJa(String? maneuver) {
+    switch (maneuver) {
+      case 'turn-left':
+      case 'turn-sharp-left':
+      case 'turn-slight-left':
+        return '左折';
+      case 'turn-right':
+      case 'turn-sharp-right':
+      case 'turn-slight-right':
+        return '右折';
+      case 'uturn-left':
+      case 'uturn-right':
+        return 'Uターン';
+      case 'fork-left':
+      case 'ramp-left':
+      case 'keep-left':
+        return '左方向';
+      case 'fork-right':
+      case 'ramp-right':
+      case 'keep-right':
+        return '右方向';
+      case 'merge':
+        return '合流';
+      case 'ferry':
+      case 'ferry-train':
+        return 'フェリー';
+      case 'roundabout-left':
+      case 'roundabout-right':
+      case 'rotary':
+        return 'ロータリー';
+      default:
+        return null;
+    }
+  }
+
+  /// Phase B-6: 逆走検知 → 自動再検索。GPS 更新ごとに呼ぶ。
+  /// 速度 >= _reverseSpeedThresholdMps かつ 走行方向と進路方向の角度差 >= _reverseAngleThresholdDeg
+  /// が _reverseDebounceDuration（3秒）連続で _fetchRoute(isRerouting: true) を発火。
+  /// 多重発火防止は逸脱判定と同じ _rerouteInFlight / _lastRerouteTime（cooldown 20秒）を共用。
+  void _updateReverseDetection() {
+    if (_isRoutePreview || _routes.isEmpty || _groupDestination == null) {
+      _reverseSince = null;
+      return;
+    }
+    if (_selectedRouteIndex < 0 || _selectedRouteIndex >= _routes.length) {
+      _reverseSince = null;
+      return;
+    }
+    // 再検索 in-flight / cooldown 中はループ防止のためスキップ（逸脱判定と共用）
+    if (_rerouteInFlight) {
+      _reverseSince = null;
+      return;
+    }
+    final now = DateTime.now();
+    if (_lastRerouteTime != null &&
+        now.difference(_lastRerouteTime!).inSeconds < _rerouteCooldownSecs) {
+      _reverseSince = null;
+      return;
+    }
+    final steps = _routes[_selectedRouteIndex].steps;
+    if (steps.isEmpty) {
+      _reverseSince = null;
+      return;
+    }
+    final i = _currentStepIndex.clamp(0, steps.length - 1);
+    final routeBearing = _routeBearingAtPosition(_myPosition, steps[i]);
+    if (routeBearing == null) {
+      _reverseSince = null;
+      return;
+    }
+
+    final diff = _angleDiff(_currentBearing, routeBearing);
+    final speedOk = _currentSpeed >= _reverseSpeedThresholdMps;
+    final angleOk = diff >= _reverseAngleThresholdDeg;
+
+    if (!(speedOk && angleOk)) {
+      _reverseSince = null;
+      return;
+    }
+
+    _reverseSince ??= now;
+    if (now.difference(_reverseSince!) >= _reverseDebounceDuration) {
+      _appendDebugLog(
+        '[B-6] 逆走確定 → 再検索 diff=${diff.toStringAsFixed(0)}° 速度=${(_currentSpeed * 3.6).toStringAsFixed(1)}km/h',
+      );
+      _reverseSince = null;
+      _fetchRoute(_groupDestination!, isRerouting: true, addAntiUTurnWaypoint: true);
+    }
+  }
+
+  /// Phase B-6: 指定 step 上で現在位置に最も近いセグメントの方位（度、0=北、東回り正）を返す。
+  /// step.points が 2点未満なら null。
+  double? _routeBearingAtPosition(LatLng pos, _RouteStep step) {
+    final pts = step.points;
+    if (pts.length < 2) return null;
+    int bestIdx = 0;
+    double bestDist = double.infinity;
+    for (int i = 0; i < pts.length - 1; i++) {
+      final d = _distanceToSegment(pos, pts[i], pts[i + 1]);
+      if (d < bestDist) {
+        bestDist = d;
+        bestIdx = i;
+      }
+    }
+    return _bearingBetween(pts[bestIdx], pts[bestIdx + 1]);
+  }
+
+  /// 2点間の方位（度、0=北、東回り正、[0, 360)）
+  double _bearingBetween(LatLng a, LatLng b) {
+    final lat1 = a.latitude * pi / 180;
+    final lat2 = b.latitude * pi / 180;
+    final dLng = (b.longitude - a.longitude) * pi / 180;
+    final y = sin(dLng) * cos(lat2);
+    final x = cos(lat1) * sin(lat2) - sin(lat1) * cos(lat2) * cos(dLng);
+    final bearing = atan2(y, x) * 180 / pi;
+    return (bearing + 360) % 360;
+  }
+
+  /// 出発点から指定方位・距離の地点を返す（球面三角法・direct 解）。高緯度でも誤差少。
+  /// bearingDeg: 0=北, 90=東, 度。distanceMeters: メートル。
+  LatLng _destinationLatLng(LatLng from, double bearingDeg, double distanceMeters) {
+    const earthRadius = 6371000.0;
+    final delta = distanceMeters / earthRadius;
+    final theta = bearingDeg * pi / 180;
+    final phi1 = from.latitude * pi / 180;
+    final lambda1 = from.longitude * pi / 180;
+    final phi2 = asin(sin(phi1) * cos(delta) + cos(phi1) * sin(delta) * cos(theta));
+    final lambda2 = lambda1 +
+        atan2(
+          sin(theta) * sin(delta) * cos(phi1),
+          cos(delta) - sin(phi1) * sin(phi2),
+        );
+    return LatLng(phi2 * 180 / pi, lambda2 * 180 / pi);
+  }
+
+  /// 2方位の差を [0, 180] に正規化
+  double _angleDiff(double a, double b) {
+    double d = (a - b).abs() % 360;
+    if (d > 180) d = 360 - d;
+    return d;
+  }
+
   /// 2点間の距離（メートル）
   double _metersTo(LatLng a, LatLng b) {
     const r = 6371000.0;
@@ -1635,6 +2359,151 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     return r * 2 * atan2(sqrt(h), sqrt(1 - h));
   }
 
+  /// Phase B-3: 現在位置から指定 step の終了地点までのルート沿い距離（メートル）。
+  /// 1) 現在位置を step polyline の最近接セグメントに投影
+  /// 2) 投影点から該当セグメント終端までの距離 + 以降のセグメント長を合算
+  double _distanceAlongStepToEnd(LatLng pos, _RouteStep step) {
+    final pts = step.points;
+    if (pts.length < 2) return 0;
+    int bestIdx = 0;
+    double bestPerp = double.infinity;
+    double bestT = 0;
+    final cosLat = cos(pos.latitude * pi / 180);
+    for (int i = 0; i < pts.length - 1; i++) {
+      final a = pts[i];
+      final b = pts[i + 1];
+      final px = (pos.longitude - a.longitude) * cosLat * 111320;
+      final py = (pos.latitude  - a.latitude)           * 111320;
+      final dx = (b.longitude - a.longitude) * cosLat * 111320;
+      final dy = (b.latitude  - a.latitude)           * 111320;
+      final lenSq = dx * dx + dy * dy;
+      if (lenSq == 0) continue;
+      final t = ((px * dx + py * dy) / lenSq).clamp(0.0, 1.0);
+      final perp = sqrt(pow(px - t * dx, 2) + pow(py - t * dy, 2));
+      if (perp < bestPerp) {
+        bestPerp = perp;
+        bestIdx = i;
+        bestT = t;
+      }
+    }
+    // 最近接セグメント上で投影点から終端までの距離
+    double remaining = _metersTo(pts[bestIdx], pts[bestIdx + 1]) * (1.0 - bestT);
+    // 以降のセグメント長を加算
+    for (int i = bestIdx + 1; i < pts.length - 1; i++) {
+      remaining += _metersTo(pts[i], pts[i + 1]);
+    }
+    return remaining;
+  }
+
+  /// Phase B-4: ルート全体の残り距離（メートル）。
+  /// 現在 step の残量（_distanceAlongStepToEnd）+ 以降の step.distanceMeters 合計。
+  double _remainingDistanceMeters() {
+    if (_routes.isEmpty) return 0;
+    if (_selectedRouteIndex < 0 || _selectedRouteIndex >= _routes.length) return 0;
+    final steps = _routes[_selectedRouteIndex].steps;
+    if (steps.isEmpty) return 0;
+    final i = _currentStepIndex.clamp(0, steps.length - 1);
+    double rem = _distanceAlongStepToEnd(_myPosition, steps[i]);
+    for (int k = i + 1; k < steps.length; k++) {
+      rem += steps[k].distanceMeters.toDouble();
+    }
+    return rem;
+  }
+
+  /// Phase B-4: ルート全体の残り時間（秒）。
+  /// 現在 step は残量比例で按分、以降は durationSeconds 合計。
+  int _remainingDurationSeconds() {
+    if (_routes.isEmpty) return 0;
+    if (_selectedRouteIndex < 0 || _selectedRouteIndex >= _routes.length) return 0;
+    final steps = _routes[_selectedRouteIndex].steps;
+    if (steps.isEmpty) return 0;
+    final i = _currentStepIndex.clamp(0, steps.length - 1);
+    final cur = steps[i];
+    final curRem = _distanceAlongStepToEnd(_myPosition, cur);
+    final curTotal = cur.distanceMeters;
+    double sec = curTotal > 0
+        ? cur.durationSeconds * (curRem / curTotal)
+        : cur.durationSeconds.toDouble();
+    for (int k = i + 1; k < steps.length; k++) {
+      sec += steps[k].durationSeconds.toDouble();
+    }
+    return sec.round();
+  }
+
+  /// Phase B-4: 「HH:mm 着」形式の到着予想時刻
+  String _formatEta(int remainingSec) {
+    final eta = DateTime.now().add(Duration(seconds: remainingSec));
+    final h = eta.hour.toString().padLeft(2, '0');
+    final m = eta.minute.toString().padLeft(2, '0');
+    return '$h:$m 着';
+  }
+
+  /// Phase B-4: 残り時間表示（"25分" / "1時間20分"）
+  String _formatRemainingDuration(int sec) {
+    if (sec < 60) return '1分未満';
+    final totalMin = (sec / 60).round();
+    if (totalMin < 60) return '$totalMin分';
+    final h = totalMin ~/ 60;
+    final m = totalMin % 60;
+    if (m == 0) return '$h時間';
+    return '$h時間$m分';
+  }
+
+  /// Phase B-4: 残り距離表示（"850m" / "12.3km"）
+  String _formatRemainingDistance(double meters) {
+    if (meters < 1000) {
+      final rounded = (meters / 10).round() * 10;
+      return '${rounded}m';
+    }
+    final km = (meters / 100).round() / 10.0;
+    return '${km.toStringAsFixed(1)}km';
+  }
+
+  /// Phase B-3: maneuver 文字列から表示アイコンへ変換。null は直進アイコン。
+  IconData _maneuverToIcon(String? maneuver) {
+    switch (maneuver) {
+      case 'turn-left':
+      case 'turn-slight-left':
+      case 'turn-sharp-left':
+        return Icons.turn_left;
+      case 'turn-right':
+      case 'turn-slight-right':
+      case 'turn-sharp-right':
+        return Icons.turn_right;
+      case 'uturn-left':
+        return Icons.u_turn_left;
+      case 'uturn-right':
+        return Icons.u_turn_right;
+      case 'keep-left':
+      case 'fork-left':
+      case 'ramp-left':
+        return Icons.turn_slight_left;
+      case 'keep-right':
+      case 'fork-right':
+      case 'ramp-right':
+        return Icons.turn_slight_right;
+      case 'merge':
+        return Icons.merge;
+      case 'roundabout-left':
+        return Icons.roundabout_left;
+      case 'roundabout-right':
+        return Icons.roundabout_right;
+      default:
+        return Icons.straight;
+    }
+  }
+
+  /// Phase B-3: ナビ距離の表示形式（"500m先" / "1.2km先" / "まもなく"）
+  String _formatNavDistance(double meters) {
+    if (meters < 50) return 'まもなく';
+    if (meters < 1000) {
+      final rounded = (meters / 10).round() * 10;
+      return '${rounded}m先';
+    }
+    final km = (meters / 100).round() / 10.0;
+    return '${km.toStringAsFixed(1)}km先';
+  }
+
   void _animateCamera(CameraUpdate update, {required bool programmatic}) {
     if (_mapController == null) return;
     if (programmatic) {
@@ -1644,6 +2513,58 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   }
 
   // Phase A-4: 「現在地へ戻る」ボタンのダブルタップで全メンバーが画面に収まる範囲にズーム。
+  /// Phase D-1: 現在地ボタンの onTap 共通処理。ナビ中・非ナビ両モードで同じ動き。
+  /// ナビ中はオフセット + 既存 bearing を維持、非ナビはズーム17の真俯瞰。
+  void _handleRecenterTap() {
+    final isNavigating = !_isRoutePreview && _routes.isNotEmpty;
+    setState(() {
+      _isFollowingMember = false;
+      _currentZoom = 17.0;
+    });
+    if (isNavigating) {
+      _animateCameraWithBearing(_myPosition, _currentBearing);
+    } else {
+      _animateCamera(
+        CameraUpdate.newLatLngZoom(_myPosition, 17.0),
+        programmatic: true,
+      );
+    }
+  }
+
+  /// 右下コラムの +/- ズームボタン処理。
+  /// programmatic: true で _lastProgrammaticMoveAt を更新 → onCameraMoveStarted の guard で
+  /// _isFollowingMember は変化せず、GPS 自動追従を切らない。
+  /// CameraUpdate.zoomBy は target/bearing/tilt を保持するので自車中心ズームが維持される。
+  void _handleZoomIn() {
+    _animateCamera(CameraUpdate.zoomBy(1), programmatic: true);
+  }
+
+  void _handleZoomOut() {
+    _animateCamera(CameraUpdate.zoomBy(-1), programmatic: true);
+  }
+
+  /// 右下コラムのシンプルな 44x44 円形マップ操作ボタン共通ビルダ（+/-）。
+  Widget _buildSquareMapButton({
+    required IconData icon,
+    required VoidCallback onTap,
+    required Color bgColor,
+    required Color iconColor,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        width: 44,
+        height: 44,
+        decoration: BoxDecoration(
+          color: bgColor,
+          shape: BoxShape.circle,
+          boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 4)],
+        ),
+        child: Icon(icon, color: iconColor, size: 24),
+      ),
+    );
+  }
+
   // - 自分から 10km 超のメンバーは除外し、SnackBar で通知
   // - tilt 0、bearing 0、padding 80 の真俯瞰
   // - _isFollowingMember=true を維持: GPS update のカメラ上書きをガード（行 1437/1479/1069）
@@ -1720,13 +2641,14 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
 
   // Phase A-4: ナビ確定後（_isRoutePreview=false かつ _routes.isNotEmpty）の
   // カメラ表示用設定を返すヘルパー。
-  // - ナビ中: 自車を画面下1/3 に置くため bearing 方向にオフセット、tilt 60度の3Dビュー
+  // - ナビ中 + 3D: 自車を画面下1/3 に置くため bearing 方向にオフセット、tilt 60度
   //   縦画面 200m / 横画面 100m（横画面は縦サイズが狭く 200m だと画面外に出るため）
+  // - ナビ中 + 2D: 自車中心、tilt 0（全周囲を均等に見せる）
   // - それ以外（プレビュー中・目的地なし・案内終了直後）: target そのまま、tilt 0
   // 約数 111320 は 1度あたりの緯度メートル換算。経度は cos(lat) で補正。
   ({LatLng target, double tilt}) _navCameraConfig(LatLng position, double bearing) {
     final isNavigating = !_isRoutePreview && _routes.isNotEmpty;
-    if (!isNavigating) {
+    if (!isNavigating || !_is3D) {
       return (target: position, tilt: 0.0);
     }
     final isLandscape = MediaQuery.of(context).orientation == Orientation.landscape;
@@ -1737,6 +2659,14 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     final offsetLat = position.latitude + dy / 111320;
     final offsetLng = position.longitude + dx / (111320 * cosLat);
     return (target: LatLng(offsetLat, offsetLng), tilt: 60.0);
+  }
+
+  // 2D/3D トグル + 永続化 + 即時カメラ反映
+  Future<void> _toggleMapTiltMode() async {
+    setState(() => _is3D = !_is3D);
+    final p = await SharedPreferences.getInstance();
+    await p.setString(_kMapTiltModeKey, _is3D ? '3D' : '2D');
+    _animateCameraWithBearing(_myPosition, _currentBearing);
   }
 
   void _animateCameraWithBearing(LatLng target, double bearing) {
@@ -1853,6 +2783,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     _connectionRefreshTimer?.cancel();
     _routeOverviewTimer?.cancel();
     _routePreferenceDebounceTimer?.cancel();
+    _searchDebounceTimer?.cancel();
     _membersSubscription?.cancel();
     _destSubscription?.cancel();
     _warningsSubscription?.cancel();
@@ -1864,6 +2795,11 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     for (final t in _notificationRetryTimers.values) { t.cancel(); }
     _appLinkSubscription?.cancel();
     WidgetsBinding.instance.removeObserver(this);
+    _markerAnimController?.removeListener(_onMarkerAnimTick);
+    _markerAnimController?.dispose();
+    // Phase D-1: シート関連リソース
+    _sheetAutoCollapseTimer?.cancel();
+    _sheetController.dispose();
     _db.child('rooms/${widget.roomCode}/members/${widget.userId}').remove();
     _bannerAd?.dispose();
     super.dispose();
@@ -1905,10 +2841,16 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
             Container(
               color: Colors.white,
               padding: const EdgeInsets.all(12),
-              child: QrImageView(
-                data: 'https://drivelink-a7ffb.web.app/join?room=${widget.roomCode}',
-                version: QrVersions.auto,
-                size: 220,
+              // SizedBox で明示サイズを与える。AlertDialog 内部の IntrinsicWidth が
+              // QrImageView 内部の LayoutBuilder に intrinsic を要求してクラッシュするのを防ぐ。
+              child: SizedBox(
+                width: 220,
+                height: 220,
+                child: QrImageView(
+                  data: 'https://drivelink-a7ffb.web.app/join?room=${widget.roomCode}',
+                  version: QrVersions.auto,
+                  size: 220,
+                ),
               ),
             ),
             const SizedBox(height: 12),
@@ -2036,7 +2978,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
         TextButton.icon(
           icon: const Icon(Icons.exit_to_app, color: Colors.white, size: 18),
           label: const Text('退出', style: TextStyle(color: Colors.white, fontSize: 13)),
-          onPressed: _exitToLogin,
+          onPressed: _confirmExitToLogin,
         ),
       ],
     );
@@ -2099,6 +3041,9 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   }
 
   Widget _buildMap() {
+    // Phase D-1: ナビ中（!preview && routes 有り）はシートが下端を覆うため
+    // 現在地・ヘディングアップボタンを上方（bottom: 86）に逃がす。
+    final isNav = !_isRoutePreview && _routes.isNotEmpty;
     return Stack(
       children: [
         GoogleMap(
@@ -2182,91 +3127,94 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
           }
         },
         ),
-        // 現在地に戻るFAB（追従停止中のみ表示・ピル型・中央下）
-        if (_isFollowingMember)
-          Positioned(
-            left: 0,
-            right: 0,
-            bottom: 24,
-            child: Center(
-              child: GestureDetector(
-                onTap: () {
-                  // Phase A-4: ナビ中はオフセット + tilt 60 維持で復帰、それ以外はズーム17の真俯瞰
-                  final isNavigating = !_isRoutePreview && _routes.isNotEmpty;
-                  setState(() {
-                    _isFollowingMember = false;
-                    _currentZoom = 17.0;
-                  });
-                  if (isNavigating) {
-                    _animateCameraWithBearing(_myPosition, _currentBearing);
-                  } else {
-                    _animateCamera(
-                      CameraUpdate.newLatLngZoom(_myPosition, 17.0),
-                      programmatic: true,
-                    );
-                  }
-                },
-                // Phase A-4: ダブルタップで全メンバーが画面に収まる範囲にズーム
+        // 左下 4 横列ボタン（左から: + / − / 現在地 / ヘディングアップ）
+        // ナビ中: ETA カード折りたたみ（70px）の真上 bottom: 78（8px breathing）
+        // シート展開時は Stack 後勝ちでシートが上から覆って自然に隠れる（仕様通り）
+        // ズームボタン操作で GPS 追従は切れない（programmatic: true により onCameraMoveStarted guard）
+        Positioned(
+          left: 12,
+          bottom: isNav ? 78 : 12,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // ＋ ズームイン
+              _buildSquareMapButton(
+                icon: Icons.add,
+                onTap: _handleZoomIn,
+                bgColor: const Color(0xFF1A3A5C).withValues(alpha: 0.9),
+                iconColor: Colors.white,
+              ),
+              const SizedBox(width: 8),
+              // − ズームアウト
+              _buildSquareMapButton(
+                icon: Icons.remove,
+                onTap: _handleZoomOut,
+                bgColor: const Color(0xFF1A3A5C).withValues(alpha: 0.9),
+                iconColor: Colors.white,
+              ),
+              const SizedBox(width: 8),
+              // 現在地（タップ: センタリング + zoom17 / ダブルタップ: 全メンバー収まるズーム）
+              // 追従中（_isFollowingMember=false）は青色 active、追従外れ（true）は灰色 inactive で
+              // タップで追従復帰できることを視覚的に示す（ヘディングアップと同パターン）。
+              GestureDetector(
+                onTap: _handleRecenterTap,
                 onDoubleTap: _zoomToAllMembers,
                 child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
+                  width: 44,
+                  height: 44,
                   decoration: BoxDecoration(
-                    color: const Color(0xFF00D4FF),
-                    borderRadius: BorderRadius.circular(24),
-                    boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 4)],
-                  ),
-                  child: const Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(Icons.my_location, color: Colors.white, size: 20),
-                      SizedBox(width: 8),
-                      Text(
-                        '現在地へ戻る',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 14,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
+                    color: _isFollowingMember
+                        ? const Color(0xFF1A3A5C).withValues(alpha: 0.9)
+                        : const Color(0xFF00D4FF),
+                    shape: BoxShape.circle,
+                    boxShadow: const [
+                      BoxShadow(color: Colors.black26, blurRadius: 4),
                     ],
+                  ),
+                  child: Icon(
+                    Icons.my_location,
+                    color: _isFollowingMember
+                        ? Colors.white70
+                        : Colors.white,
+                    size: 22,
                   ),
                 ),
               ),
-            ),
-          ),
-        // ヘディングアップ ON/OFF ボタン
-        Positioned(
-          right: 12,
-          bottom: 12,
-          child: GestureDetector(
-            onTap: () {
-              final newVal = !_headingUp;
-              setState(() {
-                _headingUp = newVal;
-                if (newVal) _isFollowingMember = false;
-              });
-              if (newVal) {
-                _animateCameraWithBearing(_myPosition, _currentBearing);
-              } else {
-                _animateCameraWithBearing(_myPosition, 0);
-              }
-            },
-            child: Container(
-              width: 44,
-              height: 44,
-              decoration: BoxDecoration(
-                color: _headingUp
-                    ? const Color(0xFF00D4FF)
-                    : const Color(0xFF1A3A5C).withValues(alpha: 0.9),
-                shape: BoxShape.circle,
-                boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 4)],
+              const SizedBox(width: 8),
+              // ヘディングアップ ON/OFF
+              GestureDetector(
+                onTap: () {
+                  final newVal = !_headingUp;
+                  setState(() {
+                    _headingUp = newVal;
+                    if (newVal) _isFollowingMember = false;
+                  });
+                  if (newVal) {
+                    _animateCameraWithBearing(_myPosition, _currentBearing);
+                  } else {
+                    _animateCameraWithBearing(_myPosition, 0);
+                  }
+                },
+                child: Container(
+                  width: 44,
+                  height: 44,
+                  decoration: BoxDecoration(
+                    color: _headingUp
+                        ? const Color(0xFF00D4FF)
+                        : const Color(0xFF1A3A5C).withValues(alpha: 0.9),
+                    shape: BoxShape.circle,
+                    boxShadow: const [
+                      BoxShadow(color: Colors.black26, blurRadius: 4),
+                    ],
+                  ),
+                  child: Icon(
+                    Icons.navigation,
+                    color: _headingUp ? Colors.white : Colors.white70,
+                    size: 24,
+                  ),
+                ),
               ),
-              child: Icon(
-                Icons.navigation,
-                color: _headingUp ? Colors.white : Colors.white70,
-                size: 24,
-              ),
-            ),
+            ],
           ),
         ),
         // プレビュー中のみ表示するフローティングアクション。
@@ -2391,6 +3339,19 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
           top: 6,
           child: _buildMemberListOverlay(),
         ),
+        // Phase B-3: 上部案内バナー（ナビ中のみ表示）。メンバーリストを避けるため右マージン70px。
+        if (!_isRoutePreview && _routes.isNotEmpty)
+          Positioned(
+            top: 8,
+            left: 8,
+            right: 70,
+            child: _buildNavigationBanner(),
+          ),
+        // Phase D-1: ナビ中はマップ下部に DraggableScrollableSheet を出す。
+        // 折りたたみ：ハンドル + ETA 1行（時刻 / 残り時間 / 残り距離）
+        // 展開：ETA + 目的地名 + アクション 4ボタン
+        if (!_isRoutePreview && _routes.isNotEmpty)
+          _buildNavigationSheet(),
       ],
     );
   }
@@ -2481,6 +3442,10 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       _inRouteOverview = false;
       _currentZoom = 17.0;
     });
+    // B-2: ナビ開始時に step 判定 state をリセット（前回のナビの残骸を持ち越さない）
+    _currentStepIndex = 0;
+    _pendingStepIndex = null;
+    _pendingSince = null;
     // プレビュー（3色） → ナビ（選択ルートのみオレンジ）に切替
     _rebuildPolylines();
     _routeOverviewTimer?.cancel();
@@ -2489,6 +3454,8 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     } else {
       _animateCamera(CameraUpdate.newLatLngZoom(_myPosition, 17.0), programmatic: true);
     }
+    // Phase D-1: ナビ確定直後 5秒間シート展開（ルート共有ボタンに即アクセス可能にする）
+    _expandSheetTemporarily();
   }
 
   // 「このルートで出発」: 自分のルートを確定してナビ開始。Firebase は触らない。
@@ -2512,6 +3479,9 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       _selectedRouteIndex = 0;
       _headingUp = false;
       _inRouteOverview = false;
+      _waypoints.clear();
+      _waypointNames.clear();
+      _waypointSaidNear.clear();
     });
     _updateDestinationMarker();
     _setPersonalDestination();
@@ -2565,7 +3535,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
             onTap: () => _onRoutePreferenceToggle('highway'),
           ),
           _buildToggleSegment(
-            label: '🚗 下道優先',
+            label: '🚗 一般道優先',
             isSelected: _routePreference == 'local',
             onTap: () => _onRoutePreferenceToggle('local'),
           ),
@@ -2627,6 +3597,13 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   }
 
   Widget _buildBottomSection() {
+    // Phase D-1: ナビ中は4ボタンをシート内に表示するため下部側は非表示にする。
+    // 通知（_pendingNotifications）はナビ中でも安全のため残す（急減速 warning 等）。
+    final isNavigating = !_isRoutePreview && _routes.isNotEmpty;
+    // ナビ中で通知も無ければ section ごと省略してマップ領域を最大化
+    if (isNavigating && _pendingNotifications.isEmpty) {
+      return const SizedBox.shrink();
+    }
     return Container(
       color: _blinkVisible ? _blinkColor.withValues(alpha: 0.25) : const Color(0xFF0D1B2A),
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
@@ -2635,9 +3612,9 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
         children: [
           if (_pendingNotifications.isNotEmpty) ...[
             _buildNotificationBanners(),
-            const SizedBox(height: 4),
+            if (!isNavigating) const SizedBox(height: 4),
           ],
-          _buildActionButtons(),
+          if (!isNavigating) _buildActionButtons(),
         ],
       ),
     );
@@ -2666,6 +3643,9 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                   _headingUp = false;
                   _isRoutePreview = false;
                   _isShared = false;
+                  _waypoints.clear();
+                  _waypointNames.clear();
+                  _waypointSaidNear.clear();
                 });
                 _animateCameraWithBearing(_myPosition, 0);
                 _updateDestinationMarker();
@@ -2706,8 +3686,40 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     ];
   }
 
-  // 縦画面 bottom 用：横並び 4ボタン（既存のレイアウト維持）
+  // 2段目アクションボタン4つ（2D/3D + 経由地 + 準備中×2）
+  // 1段目と同レイアウト（4ボタン横並び等幅）。準備中枠は onTap=null + グレーで非活性表現。
+  List<Widget> _buildActionButtonItems2(double btnWidth) {
+    return [
+      _buildActionBtn(
+        icon: _is3D ? Icons.threed_rotation : Icons.map,
+        label: _is3D ? '3D' : '2D',
+        color: const Color(0xFF1A3A5C),
+        onTap: _toggleMapTiltMode,
+        width: btnWidth,
+      ),
+      // M-1e: 経由地追加ボタン。経由地モード専用フローで SearchScreen 起動
+      _buildActionBtn(
+        icon: Icons.add_location_alt_outlined,
+        label: '経由地',
+        color: const Color(0xFFFF8A50),  // 経由地マーカー（hueOrange）と色統一
+        onTap: _addWaypointFromSearch,
+        width: btnWidth,
+      ),
+      for (int k = 0; k < 2; k++)
+        _buildActionBtn(
+          icon: Icons.more_horiz,
+          label: '準備中',
+          color: Colors.grey.shade700,
+          onTap: null,
+          width: btnWidth,
+        ),
+    ];
+  }
+
+  // 縦画面 bottom 用：横並び 4ボタン（ルート有り時のみ 2段目 [2D/3D + 経由地 + 準備中×2]
+  // を追加表示。プレビュー中も含む = 経由地追加をプレビュー段階でも可能に）
   Widget _buildActionButtons() {
+    final hasRoute = _routes.isNotEmpty;
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
       child: LayoutBuilder(
@@ -2718,12 +3730,22 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
               ((constraints.maxWidth - spacing * (buttonCount - 1)) / buttonCount)
                   .clamp(60.0, 100.0);
           final items = _buildActionButtonItems(btnWidth);
-          return Row(
-            mainAxisAlignment: MainAxisAlignment.start,
+          Widget rowOf(List<Widget> ws) => Row(
+                mainAxisAlignment: MainAxisAlignment.start,
+                children: [
+                  for (int i = 0; i < ws.length; i++) ...[
+                    if (i > 0) const SizedBox(width: spacing),
+                    ws[i],
+                  ],
+                ],
+              );
+          return Column(
+            mainAxisSize: MainAxisSize.min,
             children: [
-              for (int i = 0; i < items.length; i++) ...[
-                if (i > 0) const SizedBox(width: spacing),
-                items[i],
+              rowOf(items),
+              if (hasRoute) ...[
+                const SizedBox(height: spacing),
+                rowOf(_buildActionButtonItems2(btnWidth)),
               ],
             ],
           );
@@ -2732,10 +3754,14 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     );
   }
 
-  // 横画面 左帯用：縦並び 4ボタン（Phase A-2 で新設、width 60 固定）
+  // 横画面 左帯用：縦並び 4ボタン（ルート有り時のみ 2段目を縦に追加で計8ボタン）
   Widget _buildActionButtonsVertical() {
+    final hasRoute = _routes.isNotEmpty;
     const double spacing = 8.0;
-    final items = _buildActionButtonItems(60.0);
+    final items = [
+      ..._buildActionButtonItems(60.0),
+      if (hasRoute) ..._buildActionButtonItems2(60.0),
+    ];
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
       child: Column(
@@ -2795,11 +3821,398 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
 
   // マップ右上に重ねて表示する縦並びメンバーリスト（Phase A-1 で新設）。
   // 縦・横レイアウト共用。max-height は画面高の 50% で SingleChildScrollView でラップ。
+  /// Phase B-3: 上部案内バナー（Apple マップ風）。ナビ中（!preview && _routes.isNotEmpty）のみ表示。
+  /// 表示する maneuver は「次の step」のもの（= 現 step の終了地点で行う動作）。
+  /// 末尾 step に到達した場合は「目的地に到着」表示。
+  Widget _buildNavigationBanner() {
+    if (_isRoutePreview || _routes.isEmpty) return const SizedBox.shrink();
+    if (_selectedRouteIndex < 0 || _selectedRouteIndex >= _routes.length) {
+      return const SizedBox.shrink();
+    }
+    final steps = _routes[_selectedRouteIndex].steps;
+    if (steps.isEmpty) return const SizedBox.shrink();
+
+    final i = _currentStepIndex.clamp(0, steps.length - 1);
+    final isLastStep = i >= steps.length - 1;
+
+    // 表示用の指示 step / アイコン / テキスト
+    final IconData icon;
+    final String distanceText;
+    final String instructionText;
+    if (isLastStep) {
+      // 末尾 step → 目的地到着案内
+      final endDist = _distanceAlongStepToEnd(_myPosition, steps[i]);
+      icon = Icons.flag;
+      distanceText = _formatNavDistance(endDist);
+      instructionText = '目的地に到着';
+    } else {
+      final next = steps[i + 1];
+      icon = _maneuverToIcon(next.maneuver);
+      final distToTurn = _distanceAlongStepToEnd(_myPosition, steps[i]);
+      distanceText = _formatNavDistance(distToTurn);
+      instructionText = next.plainInstructions.isNotEmpty
+          ? next.plainInstructions
+          : '次の指示';
+    }
+
+    // Phase D-1: ダークガラス化。ClipRRect で blur を適用、シャドウは ClipRRect 外側
+    // の親 Container に設定して可視性を確保（内側に置くとクリップされて見えない）。
+    return Material(
+      color: Colors.transparent,
+      child: Container(
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(12),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.4),
+              blurRadius: 8,
+              offset: const Offset(0, 2),
+            ),
+          ],
+        ),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(12),
+          child: BackdropFilter(
+            filter: ui.ImageFilter.blur(sigmaX: 18, sigmaY: 18),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              decoration: BoxDecoration(
+                color: const Color(0xFF0D1B2A).withValues(alpha: 0.30),
+              ),
+              child: Row(
+                children: [
+                  Container(
+                    width: 56,
+                    height: 56,
+                    decoration: const BoxDecoration(
+                      color: Color(0xFF00D4FF),
+                      shape: BoxShape.circle,
+                    ),
+                    child: Icon(icon, color: Colors.black, size: 36),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          distanceText,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 22,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          instructionText,
+                          style: const TextStyle(color: Colors.white70, fontSize: 13),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        // Phase D-1: 目的地名（B-4 シートから移設）。空名なら出さない。
+                        if (_groupDestName.isNotEmpty) ...[
+                          const SizedBox(height: 2),
+                          Row(
+                            children: [
+                              Icon(
+                                Icons.place,
+                                color: Colors.white.withValues(alpha: 0.5),
+                                size: 11,
+                              ),
+                              const SizedBox(width: 3),
+                              Expanded(
+                                child: Text(
+                                  // 経由地ありなら「次の経由地 → 目的地」を表示。
+                                  // 通過判定で _waypointNames は順次先頭から
+                                  // 削除されるため、_waypointNames[0] が常に次の経由地。
+                                  _waypointNames.isEmpty
+                                      ? _groupDestName
+                                      : '${_waypointNames[0]} → $_groupDestName',
+                                  style: TextStyle(
+                                    color: Colors.white.withValues(alpha: 0.5),
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w400,
+                                  ),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Phase D-1: ナビ中の DraggableScrollableSheet（Apple マップ風 frosted glass）。
+  /// 折りたたみ：ハンドル + ETA 1行（時刻 / 残り時間 / 残り距離）
+  /// 展開：ETA行 + アクション 4ボタン（目的地名は B-3 ナビバナーで表示）
+  /// 高さ比率は LayoutBuilder で実 Stack 高さから px 換算。
+  /// _sheetController で animateTo を可能にし、ユーザーのタップで自動折りたたみタイマーをキャンセル。
+  Widget _buildNavigationSheet() {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final parentH = constraints.maxHeight;
+        // 折りたたみ ~70px（ハンドル + ETA行 + 余白）/ 展開 ~260px（ハンドル + ETA + 音声トグル
+        // + 4ボタン×2段 + 段間 spacing + 余白）。2段目（2D/3D + 準備中×3）追加で +60px。
+        final minSize = (70.0 / parentH).clamp(0.06, 0.4);
+        final maxSize = (260.0 / parentH).clamp(0.12, 0.6);
+        // _expandSheetTemporarily / GestureDetector 用にキャッシュ
+        _sheetMinSize = minSize;
+        _sheetMaxSize = maxSize;
+        _sheetParentH = parentH;
+        return Listener(
+          behavior: HitTestBehavior.translucent,
+          onPointerDown: (_) {
+            // ユーザーが触れた瞬間にタイマーキャンセル（連続操作で延長）
+            if (_sheetAutoCollapseTimer?.isActive ?? false) {
+              _sheetAutoCollapseTimer?.cancel();
+              _sheetAutoCollapseTimer = null;
+            }
+          },
+          onPointerUp: (_) {
+            // 操作完了後 10秒静止で自動折りたたみ（連続操作中は cancel→reschedule で延長）
+            _scheduleAutoCollapseAfterInteraction();
+          },
+          onPointerCancel: (_) {
+            // gesture が中断された場合も同様にタイマー再スケジュール
+            _scheduleAutoCollapseAfterInteraction();
+          },
+          child: DraggableScrollableSheet(
+            controller: _sheetController,
+            initialChildSize: minSize,
+            minChildSize: minSize,
+            maxChildSize: maxSize,
+            snap: true,
+            snapSizes: [minSize, maxSize],
+            builder: (context, scrollController) =>
+                _buildSheetBody(scrollController),
+          ),
+        );
+      },
+    );
+  }
+
+  /// ハンドル領域タップでシート展開／折りたたみをトグル。
+  /// midpoint 未満なら maxSize へ展開、以上なら minSize へ折りたたみ。
+  /// 既存のスワイプ操作は無改修。タップ後は 10秒後の自動折りたたみを再スケジュール。
+  void _toggleSheetByHandleTap() {
+    if (!_sheetController.isAttached) return;
+    final current = _sheetController.size;
+    final midpoint = (_sheetMinSize + _sheetMaxSize) / 2;
+    final target = current <= midpoint ? _sheetMaxSize : _sheetMinSize;
+    _sheetController.animateTo(
+      target,
+      duration: const Duration(milliseconds: 300),
+      curve: Curves.easeOutCubic,
+    );
+    _scheduleAutoCollapseAfterInteraction();
+  }
+
+  /// Phase D-1: ナビ確定直後にシートを展開状態にし、5秒後に折りたたみへ自動復帰。
+  /// 5秒の間にユーザーが指で触れたら Listener 経由でタイマーキャンセル（自動復帰なし）。
+  /// controller の attach は次フレーム以降のため post-frame で実行。
+  void _expandSheetTemporarily() {
+    if (_isRoutePreview || _routes.isEmpty) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!_sheetController.isAttached) return;
+      _sheetController.animateTo(
+        _sheetMaxSize,
+        duration: const Duration(milliseconds: 350),
+        curve: Curves.easeOutCubic,
+      );
+      _sheetAutoCollapseTimer?.cancel();
+      _sheetAutoCollapseTimer = Timer(const Duration(seconds: 5), () {
+        if (!_sheetController.isAttached) return;
+        _sheetController.animateTo(
+          _sheetMinSize,
+          duration: const Duration(milliseconds: 350),
+          curve: Curves.easeOutCubic,
+        );
+      });
+    });
+  }
+
+  /// Phase D-1: ユーザーがシート操作した後 10秒間さわらなければ折りたたみへ自動遷移。
+  /// onPointerDown でタイマーキャンセル → onPointerUp で再スケジュール
+  /// → 連続操作中は発火しない、操作のたびに 10秒延長される。
+  /// 折りたたみ済み（size <= midpoint）の場合は no-op で済むよう、タイマー発火時に再判定。
+  void _scheduleAutoCollapseAfterInteraction() {
+    if (!_sheetController.isAttached) return;
+    _sheetAutoCollapseTimer?.cancel();
+    _sheetAutoCollapseTimer = Timer(const Duration(seconds: 10), () {
+      if (!_sheetController.isAttached) return;
+      final currentSize = _sheetController.size;
+      final midpoint = (_sheetMinSize + _sheetMaxSize) / 2;
+      if (currentSize <= midpoint) return; // 既に折りたたみ済み
+      _sheetController.animateTo(
+        _sheetMinSize,
+        duration: const Duration(milliseconds: 350),
+        curve: Curves.easeOutCubic,
+      );
+    });
+  }
+
+  /// Phase D-1: シート内コンテンツ。ListView で `scrollController` を受けることで
+  /// DraggableScrollableSheet のドラッグ判定が正しく動く（中身は実質スクロールしない）。
+  /// すりガラス感を強めるため白α0.7 + blur sigma 30。
+  Widget _buildSheetBody(ScrollController scrollController) {
+    final remDist = _remainingDistanceMeters();
+    final remDur = _remainingDurationSeconds();
+    final eta = _formatEta(remDur);
+    final dur = _formatRemainingDuration(remDur);
+    final dist = _formatRemainingDistance(remDist);
+
+    // 透明度を上げた背景でも読めるよう文字は黒寄り＋太字
+    const primaryColor = Color(0xFF000000);
+    const flatTextStyle = TextStyle(
+      color: primaryColor,
+      fontSize: 22,
+      fontWeight: FontWeight.w700,
+      letterSpacing: -0.3,
+    );
+
+    // シート全体を縦ドラッグでサイズ変更するための GestureDetector でラップ。
+    // - HitTestBehavior.translucent で子のタップ・horizontal drag は妨げない
+    // - onVerticalDragUpdate: jumpTo で finger に追従、auto collapse タイマーをキャンセル
+    // - onVerticalDragEnd: velocity > 300 px/s なら fling、それ未満は中点ベース snap
+    //   （iOS Apple Music / マップ ETA 風の操作感）
+    return GestureDetector(
+      behavior: HitTestBehavior.translucent,
+      onVerticalDragUpdate: (details) {
+        if (!_sheetController.isAttached || _sheetParentH <= 0) return;
+        final newSize =
+            (_sheetController.size - details.delta.dy / _sheetParentH)
+                .clamp(_sheetMinSize, _sheetMaxSize);
+        _sheetController.jumpTo(newSize);
+        _sheetAutoCollapseTimer?.cancel();
+        _sheetAutoCollapseTimer = null;
+      },
+      onVerticalDragEnd: (details) {
+        if (!_sheetController.isAttached) return;
+        final velocity = details.primaryVelocity ?? 0;
+        const flingThreshold = 300.0; // px/s（Apple 標準的閾値）
+        final double target;
+        if (velocity.abs() > flingThreshold) {
+          // 下向き fling → 折りたたみ、上向き fling → 展開
+          target = velocity > 0 ? _sheetMinSize : _sheetMaxSize;
+        } else {
+          // 低速時は中点ベースの位置 snap
+          final midpoint = (_sheetMinSize + _sheetMaxSize) / 2;
+          target = _sheetController.size < midpoint
+              ? _sheetMinSize
+              : _sheetMaxSize;
+        }
+        _sheetController.animateTo(
+          target,
+          duration: const Duration(milliseconds: 200),
+          curve: Curves.easeOut,
+        );
+        _scheduleAutoCollapseAfterInteraction();
+      },
+      child: ClipRRect(
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+        child: Container(
+          // BackdropFilter 削除（GPU 負荷削減・発熱対策）。alpha 0.25 → 0.85 で文字可読性確保。
+          decoration: BoxDecoration(
+            color: Colors.white.withValues(alpha: 0.85),
+            border: Border(
+              top: BorderSide(
+                color: Colors.white.withValues(alpha: 0.5),
+                width: 0.5,
+              ),
+            ),
+          ),
+          child: ListView(
+            controller: scrollController,
+            // 内部スクロールを無効化することで、全ての縦ドラッグが DraggableScrollableSheet 本体の
+            // ドラッグへ素通りする。ScrollController は attach 維持（bridge 機構の要件）。
+            // これでハンドル外の任意位置からも上下スワイプで展開/折りたたみが効く。
+            physics: const NeverScrollableScrollPhysics(),
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+            children: [
+              // ハンドル（タップで展開／折りたたみトグル。誤作動防止のためシート本体は反応させない）
+              Center(
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: _toggleSheetByHandleTap,
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(20, 8, 20, 10),
+                    child: Container(
+                      width: 36,
+                      height: 5,
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFC7C7CC),
+                        borderRadius: BorderRadius.circular(2.5),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+              // ETA 行（時刻 / 残り時間 / 残り距離 横一列）
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                crossAxisAlignment: CrossAxisAlignment.baseline,
+                textBaseline: TextBaseline.alphabetic,
+                children: [
+                  Text(eta, style: flatTextStyle),
+                  Text(dur, style: flatTextStyle),
+                  Text(dist, style: flatTextStyle),
+                ],
+              ),
+              const SizedBox(height: 8),
+              // Phase C-3: 音声案内 ON/OFF トグル（永続化は TtsService 側で実施）
+              Row(
+                children: [
+                  const Icon(
+                    Icons.volume_up,
+                    size: 20,
+                    color: primaryColor,
+                  ),
+                  const SizedBox(width: 8),
+                  const Text(
+                    '音声案内',
+                    style: TextStyle(
+                      color: primaryColor,
+                      fontSize: 15,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const Spacer(),
+                  Switch.adaptive(
+                    value: TtsService.instance.isEnabled,
+                    onChanged: (v) async {
+                      await TtsService.instance.setEnabled(v);
+                      if (mounted) setState(() {});
+                    },
+                  ),
+                ],
+              ),
+              const SizedBox(height: 4),
+              // アクション 4ボタン（既存ヘルパー流用、展開時のみ視認）
+              _buildActionButtons(),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _buildMemberListOverlay() {
     final uids = _members.keys.toList();
     return ConstrainedBox(
       constraints: BoxConstraints(
-        maxHeight: MediaQuery.of(context).size.height * 0.5,
+        maxHeight: MediaQuery.of(context).size.height * 0.35,
       ),
       child: SingleChildScrollView(
         child: Column(
@@ -2889,16 +4302,69 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   }
 }
 
+// Phase B-7: 残り距離サンプル（時刻 + その時点での残り距離 m）。10秒履歴で増加検知に使用。
+class _DistSample {
+  final DateTime t;
+  final double dist;
+  const _DistSample(this.t, this.dist);
+}
+
 // Directions API から取得した 1 本のルート情報。複数ルート (alternatives=true) の保持に使用。
 class _Route {
-  final List<LatLng> points;
+  final List<_RouteStep> steps;
   final String summary;
   final String durationText;
   final String distanceText;
+  // leg['duration']['value'] / leg['distance']['value'] の数値版（B-4 到着予想カードで使用）
+  final int durationSeconds;
+  final int distanceMeters;
   const _Route({
-    required this.points,
+    required this.steps,
     required this.summary,
     required this.durationText,
     required this.distanceText,
+    required this.durationSeconds,
+    required this.distanceMeters,
   });
+
+  // 既存の _routePoints / passedRoute 計算用。steps の polyline を連結して返す。
+  List<LatLng> get points => [
+        for (final s in steps) ...s.points,
+      ];
+}
+
+// Directions API の step 単位の情報。B-2 の最近接点判定 / B-3 の案内バナーで使用。
+class _RouteStep {
+  final List<LatLng> points;          // この step の polyline 点列
+  final String htmlInstructions;       // 例: "<b>国道20号</b>を<b>甲府</b>方面へ進む"
+  final String plainInstructions;      // HTML タグ除去済み（バナー表示用）
+  final String? maneuver;              // 例: "turn-left" / "turn-right" / null=直進
+  final int distanceMeters;            // step['distance']['value']
+  final int durationSeconds;           // step['duration']['value']
+  final String distanceText;           // 例: "500 m"
+  final LatLng startLocation;          // step 開始座標
+  final LatLng endLocation;            // step 終了座標
+  const _RouteStep({
+    required this.points,
+    required this.htmlInstructions,
+    required this.plainInstructions,
+    required this.maneuver,
+    required this.distanceMeters,
+    required this.durationSeconds,
+    required this.distanceText,
+    required this.startLocation,
+    required this.endLocation,
+  });
+}
+
+// html_instructions から HTML タグを取り除く（<b>国道20号</b> → 国道20号）
+// Directions API の出力は単純なタグのみ含まれるので正規表現で十分。
+String _stripHtmlTags(String html) {
+  // <div> による改行ヒントは半角スペースに置換してから他タグ除去
+  return html
+      .replaceAll(RegExp(r'<div[^>]*>', caseSensitive: false), ' ')
+      .replaceAll(RegExp(r'<[^>]+>'), '')
+      .replaceAll('&nbsp;', ' ')
+      .replaceAll(RegExp(r'\s+'), ' ')
+      .trim();
 }
