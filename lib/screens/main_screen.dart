@@ -1174,7 +1174,15 @@ class _MainScreenState extends State<MainScreen>
   /// M-1d: 経由地を末尾に追加してルート再計算 + マーカー更新。
   /// 呼出側で _groupDestination != null を保証する（ボタンの活性条件で担保済）。
   Future<void> _addWaypoint(LatLng latLng, String name) async {
-    if (_groupDestination == null) return;
+    final destBefore = _groupDestination;
+    _appendDebugLog(
+      '[経由地追加] before: dest=${destBefore?.latitude.toStringAsFixed(4)},'
+      '${destBefore?.longitude.toStringAsFixed(4)} waypoints=${_waypoints.length}',
+    );
+    if (_groupDestination == null) {
+      _appendDebugLog('[経由地追加] スキップ: _groupDestination が null');
+      return;
+    }
     setState(() {
       _waypoints.add(latLng);
       _waypointNames.add(name);
@@ -1182,6 +1190,11 @@ class _MainScreenState extends State<MainScreen>
     _rebuildMarkers();              // 経由地マーカーを即時表示
     await _fetchRoute(_groupDestination!);  // 経由地込みで再計算
     if (mounted) {
+      _rebuildMarkers();            // 防御的: fetch 完了後の最終状態でも再描画
+      _appendDebugLog(
+        '[経由地追加] after: dest=${_groupDestination?.latitude.toStringAsFixed(4)},'
+        '${_groupDestination?.longitude.toStringAsFixed(4)} waypoints=${_waypoints.length}',
+      );
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text('経由地「$name」を追加しました'),
@@ -1347,21 +1360,23 @@ class _MainScreenState extends State<MainScreen>
             if (!isRerouting) {
               // 前回のタイマーをキャンセル（5秒以内の再設定時の競合防止）
               _routeOverviewTimer?.cancel();
-              // 縮退チェック（現在地と目的地が同じ場合は概観スキップ）
-              final isSamePoint = (_myPosition.latitude - dest.latitude).abs() < 0.00001 &&
+              // 縮退チェック（現在地と目的地が同じ + 経由地無し の場合のみ概観スキップ）
+              final isSamePoint = _waypoints.isEmpty &&
+                  (_myPosition.latitude - dest.latitude).abs() < 0.00001 &&
                   (_myPosition.longitude - dest.longitude).abs() < 0.00001;
               if (isSamePoint) {
                 _animateCamera(CameraUpdate.newLatLngZoom(_myPosition, 17.0), programmatic: true);
               } else {
-                // 現在地と目的地が両方見えるようズームアウト
+                // M-1d fix: bounds に waypoints も含めて全マーカーが画面に収まるように
+                final allPts = [_myPosition, dest, ..._waypoints];
                 final bounds = LatLngBounds(
                   southwest: LatLng(
-                    min(_myPosition.latitude, dest.latitude),
-                    min(_myPosition.longitude, dest.longitude),
+                    allPts.map((p) => p.latitude).reduce(min),
+                    allPts.map((p) => p.longitude).reduce(min),
                   ),
                   northeast: LatLng(
-                    max(_myPosition.latitude, dest.latitude),
-                    max(_myPosition.longitude, dest.longitude),
+                    allPts.map((p) => p.latitude).reduce(max),
+                    allPts.map((p) => p.longitude).reduce(max),
                   ),
                 );
                 _inRouteOverview = true;
