@@ -55,11 +55,17 @@ class _SearchScreenState extends State<SearchScreen> {
   // 検索リクエストの世代カウンタ。HTTP 完了時に最新世代でなければ破棄する
   // ことで、デバウンス＋ネットワーク遅延に伴う stale 結果の上書きを防ぐ。
   int _searchSeq = 0;
+  // M-1b: ピン ↔ リスト連動。null = 未選択
+  int? _selectedIdx;
+  final ScrollController _listScrollCtrl = ScrollController();
+  // animateTo(idx * extent) の精度確保のため固定高さに揃える
+  static const double _listItemExtent = 64.0;
 
   @override
   void dispose() {
     _debounceTimer?.cancel();
     _searchCtrl.dispose();
+    _listScrollCtrl.dispose();
     _mapController?.dispose();
     super.dispose();
   }
@@ -106,6 +112,7 @@ class _SearchScreenState extends State<SearchScreen> {
           setState(() {
             _results = List<Map<String, dynamic>>.from(results);
             _isSearching = false;
+            _selectedIdx = null;  // 新検索ごとに選択リセット
           });
           _fitMapToResults();
         } else {
@@ -189,6 +196,27 @@ class _SearchScreenState extends State<SearchScreen> {
   String _formatDistance(double meters) {
     if (meters < 1000) return '${meters.toStringAsFixed(0)}m';
     return '${(meters / 1000).toStringAsFixed(1)}km';
+  }
+
+  /// M-1b: リスト項目タップ → 該当ピン強調 + 地図カメラ移動 + InfoWindow 表示
+  void _selectFromList(int idx) {
+    setState(() => _selectedIdx = idx);
+    final r = _results[idx];
+    final pos = LatLng(r['lat'] as double, r['lng'] as double);
+    _mapController?.animateCamera(CameraUpdate.newLatLng(pos));
+    _mapController?.showMarkerInfoWindow(MarkerId('r$idx'));
+  }
+
+  /// M-1b: ピンタップ → 該当リスト項目強調 + リストスクロール
+  void _selectFromMap(int idx) {
+    setState(() => _selectedIdx = idx);
+    if (_listScrollCtrl.hasClients) {
+      _listScrollCtrl.animateTo(
+        idx * _listItemExtent,
+        duration: const Duration(milliseconds: 300),
+        curve: Curves.easeOut,
+      );
+    }
   }
 
   void _selectDestination(String name, double lat, double lng) {
@@ -300,6 +328,13 @@ class _SearchScreenState extends State<SearchScreen> {
           markerId: MarkerId('r$i'),
           position: LatLng(
               _results[i]['lat'] as double, _results[i]['lng'] as double),
+          // 選択中のみ hueRose で強調。通常は Google マーカー既定の hueRed
+          icon: BitmapDescriptor.defaultMarkerWithHue(
+            i == _selectedIdx
+                ? BitmapDescriptor.hueRose
+                : BitmapDescriptor.hueRed,
+          ),
+          onTap: () => _selectFromMap(i),
           infoWindow: InfoWindow(
             title: _results[i]['name'] as String,
             snippet: _results[i]['address'] as String?,
@@ -332,36 +367,50 @@ class _SearchScreenState extends State<SearchScreen> {
   Widget _buildResultsList() {
     return Container(
       color: const Color(0xFF0A1628),
-      child: ListView.separated(
-        padding: const EdgeInsets.symmetric(vertical: 4),
+      // animateTo(idx * extent) で正確にスクロールするため itemExtent 固定。
+      // セパレータは各 tile の bottom border に統合。
+      child: ListView.builder(
+        controller: _listScrollCtrl,
+        padding: EdgeInsets.zero,
         itemCount: _results.length,
-        separatorBuilder: (_, _) => const Divider(
-          color: Color(0xFF1E3A5F),
-          height: 1,
-          thickness: 0.5,
-        ),
+        itemExtent: _listItemExtent,
         itemBuilder: (ctx, i) {
           final r = _results[i];
           final lat = r['lat'] as double;
           final lng = r['lng'] as double;
           final dist = _metersTo(widget.currentPosition, LatLng(lat, lng));
-          return ListTile(
-            dense: true,
-            leading: const Icon(Icons.place, color: Color(0xFF00D4FF)),
-            title: Text(r['name'] as String,
-                style: const TextStyle(color: Colors.white, fontSize: 14),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis),
-            subtitle: Text(r['address'] as String,
-                style: const TextStyle(color: Colors.grey, fontSize: 11),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis),
-            trailing: Text(
-              _formatDistance(dist),
-              style:
-                  const TextStyle(color: Color(0xFF6680AA), fontSize: 11),
+          final isSelected = i == _selectedIdx;
+          return Container(
+            decoration: BoxDecoration(
+              color: isSelected ? const Color(0xFF1A2A40) : null,
+              border: const Border(
+                bottom: BorderSide(color: Color(0xFF1E3A5F), width: 0.5),
+              ),
             ),
-            onTap: () => _selectDestination(r['name'] as String, lat, lng),
+            child: ListTile(
+              dense: true,
+              leading: Icon(
+                Icons.place,
+                color: isSelected
+                    ? const Color(0xFFFF6B9D)   // hueRose 系
+                    : const Color(0xFF00D4FF),
+              ),
+              title: Text(r['name'] as String,
+                  style: const TextStyle(color: Colors.white, fontSize: 14),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis),
+              subtitle: Text(r['address'] as String,
+                  style: const TextStyle(color: Colors.grey, fontSize: 11),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis),
+              trailing: Text(
+                _formatDistance(dist),
+                style:
+                    const TextStyle(color: Color(0xFF6680AA), fontSize: 11),
+              ),
+              // M-1b: 確定はせず強調のみ（M-1c で詳細ダイアログ → 確定へ）
+              onTap: () => _selectFromList(i),
+            ),
           );
         },
       ),
