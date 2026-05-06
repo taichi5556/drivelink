@@ -14,6 +14,7 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:google_mobile_ads/google_mobile_ads.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../services/room_history.dart';
+import '../services/tts_service.dart';
 import 'login_screen.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:app_links/app_links.dart';
@@ -225,6 +226,8 @@ class _MainScreenState extends State<MainScreen>
     WidgetsBinding.instance.addObserver(this);
     _shareLocation = false;
     WakelockPlus.enable();
+    // Phase C-1: 音声案内サービス初期化（fire-and-forget。完了前の speak は no-op）
+    TtsService.instance.init();
     // Phase B-5: 自車マーカー位置の補間用 AnimationController。
     // GPS 受信ごとに duration 500ms で _animFrom → _animTo へ tween。
     // listener 内で _displayMyPosition を更新し、_markers の自車だけ高速差替え。
