@@ -178,6 +178,11 @@ class _MainScreenState extends State<MainScreen>
   int _lastVoiceStepIdx = -1;
   Set<int> _announcedTiers = <int>{};
 
+  // 2D/3D 表示モード。デフォルト 2D（_is3D=false）。永続化キー: 'map_tilt_mode'（'2D'/'3D'）
+  // 3D: ナビ中 tilt=60 + 自車下寄せ / 2D: ナビ中も tilt=0 + 自車中心
+  bool _is3D = false;
+  static const _kMapTiltModeKey = 'map_tilt_mode';
+
   // Phase B-7: 残り距離増加検知（90° ズレで B-6 がヒットしないケースを補完）
   // GPS tick ごとに _remainingDistanceMeters を記録、10秒前比で +100m 以上増 + 速度 5km/h 以上で再検索。
   // Cooldown は B-6 と共用（_lastRerouteTime / _rerouteCooldownSecs / _rerouteInFlight）。
@@ -257,6 +262,11 @@ class _MainScreenState extends State<MainScreen>
     // 完了後に setState することで、シート上のトグル Switch が永続化済の状態を反映する
     TtsService.instance.init().then((_) {
       if (mounted) setState(() {});
+    });
+    // 2D/3D モード復元（fire-and-forget。未設定/読込前は 2D デフォルト）
+    SharedPreferences.getInstance().then((p) {
+      final v = p.getString(_kMapTiltModeKey);
+      if (mounted) setState(() => _is3D = (v == '3D'));
     });
     // Phase B-5: 自車マーカー位置の補間用 AnimationController。
     // GPS 受信ごとに duration 500ms で _animFrom → _animTo へ tween。
@@ -2529,13 +2539,14 @@ class _MainScreenState extends State<MainScreen>
 
   // Phase A-4: ナビ確定後（_isRoutePreview=false かつ _routes.isNotEmpty）の
   // カメラ表示用設定を返すヘルパー。
-  // - ナビ中: 自車を画面下1/3 に置くため bearing 方向にオフセット、tilt 60度の3Dビュー
+  // - ナビ中 + 3D: 自車を画面下1/3 に置くため bearing 方向にオフセット、tilt 60度
   //   縦画面 200m / 横画面 100m（横画面は縦サイズが狭く 200m だと画面外に出るため）
+  // - ナビ中 + 2D: 自車中心、tilt 0（全周囲を均等に見せる）
   // - それ以外（プレビュー中・目的地なし・案内終了直後）: target そのまま、tilt 0
   // 約数 111320 は 1度あたりの緯度メートル換算。経度は cos(lat) で補正。
   ({LatLng target, double tilt}) _navCameraConfig(LatLng position, double bearing) {
     final isNavigating = !_isRoutePreview && _routes.isNotEmpty;
-    if (!isNavigating) {
+    if (!isNavigating || !_is3D) {
       return (target: position, tilt: 0.0);
     }
     final isLandscape = MediaQuery.of(context).orientation == Orientation.landscape;
@@ -2546,6 +2557,14 @@ class _MainScreenState extends State<MainScreen>
     final offsetLat = position.latitude + dy / 111320;
     final offsetLng = position.longitude + dx / (111320 * cosLat);
     return (target: LatLng(offsetLat, offsetLng), tilt: 60.0);
+  }
+
+  // 2D/3D トグル + 永続化 + 即時カメラ反映
+  Future<void> _toggleMapTiltMode() async {
+    setState(() => _is3D = !_is3D);
+    final p = await SharedPreferences.getInstance();
+    await p.setString(_kMapTiltModeKey, _is3D ? '3D' : '2D');
+    _animateCameraWithBearing(_myPosition, _currentBearing);
   }
 
   void _animateCameraWithBearing(LatLng target, double bearing) {
@@ -3559,7 +3578,29 @@ class _MainScreenState extends State<MainScreen>
     ];
   }
 
-  // 縦画面 bottom 用：横並び 4ボタン（既存のレイアウト維持）
+  // 2段目アクションボタン4つ（2D/3D + 準備中×3）
+  // 1段目と同レイアウト（4ボタン横並び等幅）。準備中枠は onTap=null + グレーで非活性表現。
+  List<Widget> _buildActionButtonItems2(double btnWidth) {
+    return [
+      _buildActionBtn(
+        icon: _is3D ? Icons.threed_rotation : Icons.map,
+        label: _is3D ? '3D' : '2D',
+        color: const Color(0xFF1A3A5C),
+        onTap: _toggleMapTiltMode,
+        width: btnWidth,
+      ),
+      for (int k = 0; k < 3; k++)
+        _buildActionBtn(
+          icon: Icons.more_horiz,
+          label: '準備中',
+          color: Colors.grey.shade700,
+          onTap: null,
+          width: btnWidth,
+        ),
+    ];
+  }
+
+  // 縦画面 bottom 用：横並び 4ボタン x 2段（2段目に 2D/3D + 準備中×3）
   Widget _buildActionButtons() {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
@@ -3571,13 +3612,22 @@ class _MainScreenState extends State<MainScreen>
               ((constraints.maxWidth - spacing * (buttonCount - 1)) / buttonCount)
                   .clamp(60.0, 100.0);
           final items = _buildActionButtonItems(btnWidth);
-          return Row(
-            mainAxisAlignment: MainAxisAlignment.start,
+          final items2 = _buildActionButtonItems2(btnWidth);
+          Widget rowOf(List<Widget> ws) => Row(
+                mainAxisAlignment: MainAxisAlignment.start,
+                children: [
+                  for (int i = 0; i < ws.length; i++) ...[
+                    if (i > 0) const SizedBox(width: spacing),
+                    ws[i],
+                  ],
+                ],
+              );
+          return Column(
+            mainAxisSize: MainAxisSize.min,
             children: [
-              for (int i = 0; i < items.length; i++) ...[
-                if (i > 0) const SizedBox(width: spacing),
-                items[i],
-              ],
+              rowOf(items),
+              const SizedBox(height: spacing),
+              rowOf(items2),
             ],
           );
         },
@@ -3585,10 +3635,13 @@ class _MainScreenState extends State<MainScreen>
     );
   }
 
-  // 横画面 左帯用：縦並び 4ボタン（Phase A-2 で新設、width 60 固定）
+  // 横画面 左帯用：縦並び 8ボタン（1段目4 + 2段目4、SingleChildScrollView でスクロール対応済）
   Widget _buildActionButtonsVertical() {
     const double spacing = 8.0;
-    final items = _buildActionButtonItems(60.0);
+    final items = [
+      ..._buildActionButtonItems(60.0),
+      ..._buildActionButtonItems2(60.0),
+    ];
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
       child: Column(
@@ -3785,11 +3838,10 @@ class _MainScreenState extends State<MainScreen>
     return LayoutBuilder(
       builder: (context, constraints) {
         final parentH = constraints.maxHeight;
-        // 折りたたみ ~70px（ハンドル + ETA行 + 余白）/ 展開 ~200px（ハンドル + ETA + 音声トグル + 4ボタン + 余白）
-        // 200px はコンテンツ実測 191px に対して 9px の余裕。下記 NeverScrollableScrollPhysics と
-        // 併せてシート展開時にコンテンツが確実に収まるよう保証。
+        // 折りたたみ ~70px（ハンドル + ETA行 + 余白）/ 展開 ~260px（ハンドル + ETA + 音声トグル
+        // + 4ボタン×2段 + 段間 spacing + 余白）。2段目（2D/3D + 準備中×3）追加で +60px。
         final minSize = (70.0 / parentH).clamp(0.06, 0.4);
-        final maxSize = (200.0 / parentH).clamp(0.12, 0.6);
+        final maxSize = (260.0 / parentH).clamp(0.12, 0.6);
         // _expandSheetTemporarily / GestureDetector 用にキャッシュ
         _sheetMinSize = minSize;
         _sheetMaxSize = maxSize;
