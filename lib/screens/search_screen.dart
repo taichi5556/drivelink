@@ -7,7 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 
 /// 検索画面の戻り値。`Navigator.pop(SearchResultAction(...))` で main_screen 側へ
-/// 確定内容を返す。type は 'destination' / 'reset' / （将来 'waypoint'）。
+/// 確定内容を返す。type は 'destination' / 'reset' / 'waypoint' / 'clear_waypoints'。
 class SearchResultAction {
   final String type;
   final String? name;
@@ -34,6 +34,13 @@ class SearchScreen extends StatefulWidget {
   // M-1c: 経由地ボタンの活性条件（既存ルートあり）
   final bool hasActiveRoute;
   final String placesApiKey;
+  // M-1e fix: 経由地モード判定。true の時:
+  // - タイトル「経由地を検索」/ 履歴・「現在地を目的地」非表示
+  // - 詳細ダイアログは「経由地として追加」のみ表示（常時活性）
+  // - 右上ゴミ箱は hasWaypoints 時のみ表示、type='clear_waypoints' を返す
+  final bool isWaypointMode;
+  // 経由地モードでゴミ箱を出すかの判定（経由地が1個以上ある時）
+  final bool hasWaypoints;
 
   const SearchScreen({
     super.key,
@@ -43,6 +50,8 @@ class SearchScreen extends StatefulWidget {
     required this.hasActiveDestination,
     required this.hasActiveRoute,
     required this.placesApiKey,
+    this.isWaypointMode = false,
+    this.hasWaypoints = false,
   });
 
   @override
@@ -283,48 +292,55 @@ class _SearchScreenState extends State<SearchScreen> {
               ),
             ]),
             const SizedBox(height: 16),
-            // 目的地として設定（常時活性）
-            SizedBox(
-              width: double.infinity,
-              child: ElevatedButton.icon(
-                icon: const Icon(Icons.flag, size: 18),
-                label: const Text('目的地として設定'),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: const Color(0xFF00D4FF),
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(vertical: 12),
+            // 目的地として設定（通常モードのみ表示）
+            if (!widget.isWaypointMode) ...[
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton.icon(
+                  icon: const Icon(Icons.flag, size: 18),
+                  label: const Text('目的地として設定'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF00D4FF),
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                  ),
+                  onPressed: () {
+                    Navigator.pop(dialogCtx);
+                    Navigator.pop(
+                      context,
+                      SearchResultAction(
+                        type: 'destination',
+                        name: name,
+                        lat: lat,
+                        lng: lng,
+                      ),
+                    );
+                  },
                 ),
-                onPressed: () {
-                  Navigator.pop(dialogCtx);
-                  Navigator.pop(
-                    context,
-                    SearchResultAction(
-                      type: 'destination',
-                      name: name,
-                      lat: lat,
-                      lng: lng,
-                    ),
-                  );
-                },
               ),
-            ),
-            const SizedBox(height: 8),
-            // 経由地として追加（M-1c: hasActiveRoute=true 時のみ活性、押下で SnackBar 仮）
+              const SizedBox(height: 8),
+            ],
+            // 経由地として追加
+            // - 通常モード: hasActiveRoute=true 時のみ活性
+            // - 経由地モード: 常時活性（モード入りの前提条件）
             SizedBox(
               width: double.infinity,
               child: Tooltip(
-                message: widget.hasActiveRoute ? '' : 'ルート設定後に使用可能',
+                message: (widget.hasActiveRoute || widget.isWaypointMode)
+                    ? ''
+                    : 'ルート設定後に使用可能',
                 child: ElevatedButton.icon(
                   icon: const Icon(Icons.add_location_alt_outlined, size: 18),
                   label: const Text('経由地として追加'),
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: widget.hasActiveRoute
-                        ? const Color(0xFFFF8A50)
-                        : Colors.grey.shade700,
+                    backgroundColor:
+                        (widget.hasActiveRoute || widget.isWaypointMode)
+                            ? const Color(0xFFFF8A50)
+                            : Colors.grey.shade700,
                     foregroundColor: Colors.white,
                     padding: const EdgeInsets.symmetric(vertical: 12),
                   ),
-                  onPressed: widget.hasActiveRoute
+                  onPressed: (widget.hasActiveRoute || widget.isWaypointMode)
                       ? () {
                           Navigator.pop(dialogCtx);
                           Navigator.pop(
@@ -363,9 +379,21 @@ class _SearchScreenState extends State<SearchScreen> {
         backgroundColor: const Color(0xFF0D1B2A),
         foregroundColor: Colors.white,
         elevation: 0,
-        title: const Text('🔍 目的地を検索', style: TextStyle(fontSize: 16)),
+        title: Text(
+          widget.isWaypointMode ? '🔍 経由地を検索' : '🔍 目的地を検索',
+          style: const TextStyle(fontSize: 16),
+        ),
         actions: [
-          if (widget.hasActiveDestination)
+          if (widget.isWaypointMode && widget.hasWaypoints)
+            IconButton(
+              icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
+              tooltip: '経由地をクリア',
+              onPressed: () => Navigator.pop(
+                context,
+                const SearchResultAction(type: 'clear_waypoints'),
+              ),
+            )
+          else if (!widget.isWaypointMode && widget.hasActiveDestination)
             IconButton(
               icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
               tooltip: '目的地をリセット',
@@ -549,6 +577,19 @@ class _SearchScreenState extends State<SearchScreen> {
   }
 
   Widget _buildEmptyStateBody() {
+    // 経由地モードでは履歴・「現在地を目的地」ボタンは非表示。検索を促すヒントのみ
+    if (widget.isWaypointMode) {
+      return const Center(
+        child: Padding(
+          padding: EdgeInsets.all(24),
+          child: Text(
+            '場所を検索して経由地として追加',
+            style: TextStyle(color: Color(0xFF6680AA), fontSize: 13),
+            textAlign: TextAlign.center,
+          ),
+        ),
+      );
+    }
     return ListView(
       padding: const EdgeInsets.symmetric(vertical: 4),
       children: [

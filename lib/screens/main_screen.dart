@@ -1171,6 +1171,53 @@ class _MainScreenState extends State<MainScreen>
 
   // ── ここまで警告ポイント ───────────────────────────────────────
 
+  /// M-1e fix: 経由地モードで SearchScreen を起動し、結果に応じて
+  /// 経由地追加 / 経由地全クリアを実行する。
+  Future<void> _addWaypointFromSearch() async {
+    if (!mounted) return;
+    final result = await Navigator.push<SearchResultAction>(
+      context,
+      MaterialPageRoute(builder: (_) => SearchScreen(
+        currentPosition: _myPosition,
+        hasGpsFix: _hasGpsFix,
+        history: const [],
+        hasActiveDestination: false,
+        hasActiveRoute: true,
+        hasWaypoints: _waypoints.isNotEmpty,
+        isWaypointMode: true,
+        placesApiKey: 'AIzaSyChuUZypiVhojgCO6ZgZML-ZW3eYLtti5c',
+      )),
+    );
+    if (!mounted || result == null) return;
+    if (result.type == 'waypoint') {
+      await _addWaypoint(LatLng(result.lat!, result.lng!), result.name!);
+    } else if (result.type == 'clear_waypoints') {
+      await _clearWaypoints();
+    }
+  }
+
+  /// M-1e fix: 経由地を全クリアしてルート再計算。
+  Future<void> _clearWaypoints() async {
+    if (_waypoints.isEmpty) return;
+    setState(() {
+      _waypoints.clear();
+      _waypointNames.clear();
+    });
+    _rebuildMarkers();
+    if (_groupDestination != null) {
+      await _fetchRoute(_groupDestination!, isRerouting: true, force: true);
+    }
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('経由地をクリアしました'),
+          backgroundColor: Color(0xFF1A3A5C),
+          duration: Duration(seconds: 2),
+        ),
+      );
+    }
+  }
+
   /// M-1d: 経由地を末尾に追加してルート再計算 + マーカー更新。
   /// 呼出側で _groupDestination != null を保証する（ボタンの活性条件で担保済）。
   Future<void> _addWaypoint(LatLng latLng, String name) async {
@@ -3532,12 +3579,12 @@ class _MainScreenState extends State<MainScreen>
         onTap: _toggleMapTiltMode,
         width: btnWidth,
       ),
-      // M-1e: 経由地追加ボタン。SearchScreen 起動 → 検索結果から「経由地として追加」を選択
+      // M-1e: 経由地追加ボタン。経由地モード専用フローで SearchScreen 起動
       _buildActionBtn(
         icon: Icons.add_location_alt_outlined,
         label: '経由地',
         color: const Color(0xFFFF8A50),  // 経由地マーカー（hueOrange）と色統一
-        onTap: _setPersonalDestination,
+        onTap: _addWaypointFromSearch,
         width: btnWidth,
       ),
       for (int k = 0; k < 2; k++)
