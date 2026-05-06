@@ -3463,6 +3463,22 @@ class _MainScreenState extends State<MainScreen>
     );
   }
 
+  /// ハンドル領域タップでシート展開／折りたたみをトグル。
+  /// midpoint 未満なら maxSize へ展開、以上なら minSize へ折りたたみ。
+  /// 既存のスワイプ操作は無改修。タップ後は 10秒後の自動折りたたみを再スケジュール。
+  void _toggleSheetByHandleTap() {
+    if (!_sheetController.isAttached) return;
+    final current = _sheetController.size;
+    final midpoint = (_sheetMinSize + _sheetMaxSize) / 2;
+    final target = current <= midpoint ? _sheetMaxSize : _sheetMinSize;
+    _sheetController.animateTo(
+      target,
+      duration: const Duration(milliseconds: 300),
+      curve: Curves.easeOutCubic,
+    );
+    _scheduleAutoCollapseAfterInteraction();
+  }
+
   /// Phase D-1: ナビ確定直後にシートを展開状態にし、5秒後に折りたたみへ自動復帰。
   /// 5秒の間にユーザーが指で触れたら Listener 経由でタイマーキャンセル（自動復帰なし）。
   /// controller の attach は次フレーム以降のため post-frame で実行。
@@ -3544,15 +3560,21 @@ class _MainScreenState extends State<MainScreen>
             controller: scrollController,
             padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
             children: [
-              // ハンドル
+              // ハンドル（タップで展開／折りたたみトグル。誤作動防止のためシート本体は反応させない）
               Center(
-                child: Container(
-                  width: 36,
-                  height: 5,
-                  margin: const EdgeInsets.only(top: 8, bottom: 10),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFFC7C7CC),
-                    borderRadius: BorderRadius.circular(2.5),
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: _toggleSheetByHandleTap,
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(20, 8, 20, 10),
+                    child: Container(
+                      width: 36,
+                      height: 5,
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFC7C7CC),
+                        borderRadius: BorderRadius.circular(2.5),
+                      ),
+                    ),
                   ),
                 ),
               ),
