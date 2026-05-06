@@ -104,6 +104,10 @@ class _MainScreenState extends State<MainScreen>
   static const _rerouteSpeedThresholdMps        = 13.89;  // 高低閾値の境界（50km/h）
   static const _rerouteCooldownSecs             = 20;     // 再検索間隔（秒）
 
+  // Phase F-1: 停車時 bearing 固定。速度がこの値未満の時は GPS bearing 更新を止め
+  // 直近の値を維持する（停車・徐行・室内 GPS ジッタで画面がぐるぐる回るのを防ぐ）。
+  static const _bearingUpdateMinSpeedMps = 0.55; // 約 2 km/h
+
   // 接続状態判定（last_seen の経過時間がこの値を超えたら「接続切れ」表示）
   static const _connectionStaleSecs = 60;
   // メンバーリストUIの経過時間表示を更新する間隔
@@ -1590,8 +1594,9 @@ class _MainScreenState extends State<MainScreen>
       final spd = pos.speed;
       // 負値（取得不可）は 0 扱い。bearing ガードの外で常に更新
       _currentSpeed = spd > 0 ? spd : 0.0;
-      // 速度が十分な場合のみbearingを更新（停車中の誤検知を防ぐ）
-      if (spd > 0.5 && pos.heading >= 0) {
+      // Phase F-1: 速度 >= 2km/h の時のみ bearing 更新（停車・徐行で画面回転を抑止）。
+      // 走り出したら自動で反映再開、ヘディングアップで自然に追従する。
+      if (spd > _bearingUpdateMinSpeedMps && pos.heading >= 0) {
         _currentBearing = pos.heading;
       }
       if (_shareLocation) {
@@ -3429,11 +3434,19 @@ class _MainScreenState extends State<MainScreen>
         return Listener(
           behavior: HitTestBehavior.translucent,
           onPointerDown: (_) {
-            // ユーザーが触れた瞬間に自動折りたたみタイマーをキャンセル（ドラッグ完了待ち不要）
+            // ユーザーが触れた瞬間にタイマーキャンセル（連続操作で延長）
             if (_sheetAutoCollapseTimer?.isActive ?? false) {
               _sheetAutoCollapseTimer?.cancel();
               _sheetAutoCollapseTimer = null;
             }
+          },
+          onPointerUp: (_) {
+            // 操作完了後 10秒静止で自動折りたたみ（連続操作中は cancel→reschedule で延長）
+            _scheduleAutoCollapseAfterInteraction();
+          },
+          onPointerCancel: (_) {
+            // gesture が中断された場合も同様にタイマー再スケジュール
+            _scheduleAutoCollapseAfterInteraction();
           },
           child: DraggableScrollableSheet(
             controller: _sheetController,
@@ -3471,6 +3484,26 @@ class _MainScreenState extends State<MainScreen>
           curve: Curves.easeOutCubic,
         );
       });
+    });
+  }
+
+  /// Phase D-1: ユーザーがシート操作した後 10秒間さわらなければ折りたたみへ自動遷移。
+  /// onPointerDown でタイマーキャンセル → onPointerUp で再スケジュール
+  /// → 連続操作中は発火しない、操作のたびに 10秒延長される。
+  /// 折りたたみ済み（size <= midpoint）の場合は no-op で済むよう、タイマー発火時に再判定。
+  void _scheduleAutoCollapseAfterInteraction() {
+    if (!_sheetController.isAttached) return;
+    _sheetAutoCollapseTimer?.cancel();
+    _sheetAutoCollapseTimer = Timer(const Duration(seconds: 10), () {
+      if (!_sheetController.isAttached) return;
+      final currentSize = _sheetController.size;
+      final midpoint = (_sheetMinSize + _sheetMaxSize) / 2;
+      if (currentSize <= midpoint) return; // 既に折りたたみ済み
+      _sheetController.animateTo(
+        _sheetMinSize,
+        duration: const Duration(milliseconds: 350),
+        curve: Curves.easeOutCubic,
+      );
     });
   }
 
