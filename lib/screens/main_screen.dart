@@ -183,6 +183,9 @@ class _MainScreenState extends State<MainScreen>
   // _handlePositionUpdate 以降のロジックは無改修で動作する。
   bool _demoMode = false;
   DemoLocationSource? _demoSource;
+  // Phase H-2: デモ走行制御
+  bool _demoRunning = false;
+  double _demoSpeedKmh = 60.0;
 
   // Phase B-6: 逆走検知 → 自動再検索
   // 速度 >= 18km/h かつ 走行方向と進路方向の角度差 >= 135° が連続3秒で確定 → _fetchRoute(reroute) 発火。
@@ -1213,6 +1216,8 @@ class _MainScreenState extends State<MainScreen>
                 _isFollowingMember = false;
               }
             });
+            // Phase H-2: 新ルート構築直後に Demo にも反映（B-6/B-7 reroute 後も自動追従継続）
+            _syncDemoRoute();
             debugPrint('[Phase5] ルート構築: ${newRoutes.length}本 (選択中=$_selectedRouteIndex, 通過済み着色=有効)');
             // [DEBUG-TEMP] 再検索完了ログ
             if (isRerouting) {
@@ -1679,9 +1684,56 @@ class _MainScreenState extends State<MainScreen>
     } else {
       _demoSource?.dispose();
       _demoSource = null;
-      setState(() => _demoMode = false);
+      setState(() {
+        _demoMode = false;
+        _demoRunning = false;
+      });
     }
     _startLocationStream();
+  }
+
+  // Phase H-2: 現在の選択ルートの polyline を DemoLocationSource に流し込む。
+  // 走行開始時 / reroute 完了時に呼ぶことで、デモ走行が常に最新ルートに追従する。
+  void _syncDemoRoute() {
+    if (_demoSource == null) return;
+    if (_routes.isEmpty || _selectedRouteIndex < 0 ||
+        _selectedRouteIndex >= _routes.length) {
+      _demoSource!.clearRoute();
+      return;
+    }
+    _demoSource!.setRoute(_routes[_selectedRouteIndex].points);
+  }
+
+  // Phase H-2: 走行開始/停止。ルート未設定なら snackbar で誘導。
+  void _toggleDemoRunning() {
+    if (_demoSource == null) return;
+    if (!_demoRunning) {
+      if (_routes.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('先にルートを設定してください'),
+            backgroundColor: Color(0xFF1A3A5C),
+          ),
+        );
+        return;
+      }
+      _syncDemoRoute();
+      _demoSource!.setSpeedKmh(_demoSpeedKmh);
+      _demoSource!.setAutoFollow(true);
+      setState(() => _demoRunning = true);
+    } else {
+      _demoSource!.setAutoFollow(false);
+      _demoSource!.setSpeedKmh(0);
+      setState(() => _demoRunning = false);
+    }
+  }
+
+  // Phase H-2: 速度スライダー変更時。走行中なら即座に Demo に反映。
+  void _onDemoSpeedChanged(double kmh) {
+    setState(() => _demoSpeedKmh = kmh);
+    if (_demoRunning && _demoSource != null) {
+      _demoSource!.setSpeedKmh(kmh);
+    }
   }
 
   Future<void> _updateLocation() async {
@@ -3088,6 +3140,64 @@ class _MainScreenState extends State<MainScreen>
             ),
           ),
         ),
+        // Phase H-2: デモ走行コントロールパネル（DEMO ON 時のみ表示、リリース前 revert 予定）
+        if (_demoMode)
+          Positioned(
+            right: 12,
+            top: 130,
+            width: 200,
+            child: Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: Colors.black.withValues(alpha: 0.75),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '速度: ${_demoSpeedKmh.toStringAsFixed(0)} km/h',
+                    style: const TextStyle(color: Colors.white, fontSize: 12),
+                  ),
+                  SliderTheme(
+                    data: SliderTheme.of(context).copyWith(
+                      trackHeight: 2,
+                      thumbShape: const RoundSliderThumbShape(
+                        enabledThumbRadius: 7,
+                      ),
+                    ),
+                    child: Slider(
+                      min: 5,
+                      max: 100,
+                      divisions: 19,
+                      value: _demoSpeedKmh,
+                      onChanged: _onDemoSpeedChanged,
+                    ),
+                  ),
+                  SizedBox(
+                    width: double.infinity,
+                    height: 32,
+                    child: ElevatedButton(
+                      onPressed: _toggleDemoRunning,
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: _demoRunning
+                            ? Colors.orangeAccent
+                            : Colors.greenAccent.shade400,
+                        foregroundColor: Colors.black,
+                        padding: EdgeInsets.zero,
+                        textStyle: const TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      child: Text(_demoRunning ? '停止' : '走行開始'),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
       ],
     );
   }
