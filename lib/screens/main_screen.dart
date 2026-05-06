@@ -186,6 +186,10 @@ class _MainScreenState extends State<MainScreen>
   // Phase H-2: デモ走行制御
   bool _demoRunning = false;
   double _demoSpeedKmh = 60.0;
+  // Phase H-3: 逆走シミュレーション（B-6 検証用）
+  Timer? _demoReverseTimer;
+  bool _demoReverseActive = false;
+  static const Duration _demoReverseDuration = Duration(seconds: 7);
 
   // Phase B-6: 逆走検知 → 自動再検索
   // 速度 >= 18km/h かつ 走行方向と進路方向の角度差 >= 135° が連続3秒で確定 → _fetchRoute(reroute) 発火。
@@ -1736,6 +1740,22 @@ class _MainScreenState extends State<MainScreen>
     }
   }
 
+  // Phase H-3: B-6 逆走検知をデモ再現。bearing を 180° 反転して 7秒維持 → 自動復帰。
+  // B-6 発火条件は速度 ≥ 18km/h かつ 角度差 ≥ 135° が 3秒連続なので、
+  // 走行速度を 60km/h 等にしておけば 3秒経過時点で発火 → 残り 4秒で reroute 観測。
+  void _triggerDemoReverse() {
+    if (_demoSource == null || !_demoRunning) return;
+    if (_demoReverseActive) return;
+    _demoReverseTimer?.cancel();
+    _demoSource!.setBearingOffset(180);
+    setState(() => _demoReverseActive = true);
+    _demoReverseTimer = Timer(_demoReverseDuration, () {
+      if (!mounted) return;
+      _demoSource?.setBearingOffset(0);
+      setState(() => _demoReverseActive = false);
+    });
+  }
+
   Future<void> _updateLocation() async {
     if (_updateLocationInProgress) return;
     _updateLocationInProgress = true;
@@ -2550,6 +2570,9 @@ class _MainScreenState extends State<MainScreen>
     for (final t in _notificationHideTimers.values) { t.cancel(); }
     for (final t in _notificationRetryTimers.values) { t.cancel(); }
     _appLinkSubscription?.cancel();
+    // Phase H: デモモード関連タイマー / Stream
+    _demoReverseTimer?.cancel();
+    _demoSource?.dispose();
     WidgetsBinding.instance.removeObserver(this);
     _markerAnimController?.removeListener(_onMarkerAnimTick);
     _markerAnimController?.dispose();
@@ -3192,6 +3215,33 @@ class _MainScreenState extends State<MainScreen>
                         ),
                       ),
                       child: Text(_demoRunning ? '停止' : '走行開始'),
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  // Phase H-3: B-6 逆走検知の検証ボタン（走行中のみ押下可）
+                  SizedBox(
+                    width: double.infinity,
+                    height: 30,
+                    child: ElevatedButton(
+                      onPressed: (_demoRunning && !_demoReverseActive)
+                          ? _triggerDemoReverse
+                          : null,
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: _demoReverseActive
+                            ? Colors.red.shade300
+                            : Colors.red.shade400,
+                        foregroundColor: Colors.white,
+                        disabledBackgroundColor: Colors.grey.shade800,
+                        disabledForegroundColor: Colors.grey.shade500,
+                        padding: EdgeInsets.zero,
+                        textStyle: const TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      child: Text(
+                        _demoReverseActive ? '逆走中…' : '逆走 7秒（B-6）',
+                      ),
                     ),
                   ),
                 ],
