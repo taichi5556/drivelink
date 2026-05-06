@@ -468,6 +468,44 @@ class _MainScreenState extends State<MainScreen>
     );
   }
 
+  /// 退出ボタン押下時の確認ダイアログ。OK 時のみ _exitToLogin を呼ぶ。
+  /// barrierDismissible: true で背景タップ・キャンセルともに退出しない。
+  Future<void> _confirmExitToLogin() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      barrierDismissible: true,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF0D1B2A),
+        title: const Text(
+          'ルームから退出しますか？',
+          style: TextStyle(color: Colors.white, fontSize: 16),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text(
+              'キャンセル',
+              style: TextStyle(color: Colors.grey),
+            ),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text(
+              '退出',
+              style: TextStyle(
+                color: Color(0xFFFF453A), // iOS systemRed（destructive）
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true) {
+      await _exitToLogin();
+    }
+  }
+
   Future<void> _initAppLinks() async {
     try {
       final initialLink = await _appLinks.getInitialLink();
@@ -2687,7 +2725,7 @@ class _MainScreenState extends State<MainScreen>
         TextButton.icon(
           icon: const Icon(Icons.exit_to_app, color: Colors.white, size: 18),
           label: const Text('退出', style: TextStyle(color: Colors.white, fontSize: 13)),
-          onPressed: _exitToLogin,
+          onPressed: _confirmExitToLogin,
         ),
       ],
     );
