@@ -105,6 +105,11 @@ class _MainScreenState extends State<MainScreen>
   static const _rerouteSpeedThresholdMps        = 13.89;  // 高低閾値の境界（50km/h）
   static const _rerouteCooldownSecs             = 20;     // 再検索間隔（秒）
 
+  // Uターン回避用 waypoint（B-6 逆走検知 / B-7 残距離増加検知の再検索時のみ適用）
+  // 進行方向に少し先の点を waypoint として渡し、物理的に Uターン不可能なルートを生成させる。
+  static const _waypointMinSpeedMps   = 1.389; // 5 km/h（これ未満では waypoint 追加しない）
+  static const _waypointLookaheadSec  = 3.0;   // 速度 × この秒数 = waypoint までの距離
+
   // Phase F-1: 停車時 bearing 固定。速度がこの値未満の時は GPS bearing 更新を止め
   // 直近の値を維持する（停車・徐行・室内 GPS ジッタで画面がぐるぐる回るのを防ぐ）。
   static const _bearingUpdateMinSpeedMps = 0.55; // 約 2 km/h
@@ -1152,7 +1157,12 @@ class _MainScreenState extends State<MainScreen>
     _rebuildMarkers();
   }
 
-  Future<bool> _fetchRoute(LatLng dest, {bool isRerouting = false, bool force = false}) async {
+  Future<bool> _fetchRoute(
+    LatLng dest, {
+    bool isRerouting = false,
+    bool force = false,
+    bool addAntiUTurnWaypoint = false,
+  }) async {
     if (isRerouting && !force && _rerouteInFlight) return false;
     if (isRerouting) _rerouteInFlight = true;
 
@@ -1163,9 +1173,22 @@ class _MainScreenState extends State<MainScreen>
       final origin = '${_myPosition.latitude},${_myPosition.longitude}';
       final destination = '${dest.latitude},${dest.longitude}';
       final avoidParam = _routePreference == 'local' ? '&avoid=highways' : '';
+
+      // Uターン回避: B-6/B-7 自動再検索時のみ、進行方向に少し先の点を via waypoint として追加。
+      // via: プレフィックスで停車地扱いを回避（leg 分割を起こさず単一 leg のまま）。
+      String waypointParam = '';
+      if (addAntiUTurnWaypoint && _currentSpeed >= _waypointMinSpeedMps) {
+        final offsetMeters = _currentSpeed * _waypointLookaheadSec;
+        final wp = _destinationLatLng(_myPosition, _currentBearing, offsetMeters);
+        waypointParam = '&waypoints=via:${wp.latitude},${wp.longitude}';
+        _appendDebugLog(
+          '[再検索waypoint] +${offsetMeters.toStringAsFixed(0)}m 方位${_currentBearing.toStringAsFixed(0)}° → ${wp.latitude.toStringAsFixed(5)},${wp.longitude.toStringAsFixed(5)}',
+        );
+      }
+
       final url = 'https://maps.googleapis.com/maps/api/directions/json'
           '?origin=$origin&destination=$destination'
-          '&mode=driving&language=ja&alternatives=true$avoidParam&key=$apiKey';
+          '&mode=driving&language=ja&alternatives=true$avoidParam$waypointParam&key=$apiKey';
       final client = HttpClient();
       try {
         final request = await client.getUrl(Uri.parse(url));
@@ -1791,7 +1814,7 @@ class _MainScreenState extends State<MainScreen>
     if (dist > threshold) {
       debugPrint('[逸脱] 検知 → 再検索');
       _appendDebugLog('[逸脱] 検知 → 再検索');
-      _fetchRoute(_groupDestination!, isRerouting: true);
+      _fetchRoute(_groupDestination!, isRerouting: true, addAntiUTurnWaypoint: true);
     }
   }
 
@@ -1972,7 +1995,7 @@ class _MainScreenState extends State<MainScreen>
             '[B-7] 残り距離増加 → 再検索 +${increase.toStringAsFixed(0)}m 速度=${(_currentSpeed * 3.6).toStringAsFixed(1)}km/h',
           );
           _distSamples.clear();
-          _fetchRoute(_groupDestination!, isRerouting: true);
+          _fetchRoute(_groupDestination!, isRerouting: true, addAntiUTurnWaypoint: true);
           return;
         }
       }
@@ -2065,7 +2088,7 @@ class _MainScreenState extends State<MainScreen>
         '[B-6] 逆走確定 → 再検索 diff=${diff.toStringAsFixed(0)}° 速度=${(_currentSpeed * 3.6).toStringAsFixed(1)}km/h',
       );
       _reverseSince = null;
-      _fetchRoute(_groupDestination!, isRerouting: true);
+      _fetchRoute(_groupDestination!, isRerouting: true, addAntiUTurnWaypoint: true);
     }
   }
 
@@ -2095,6 +2118,23 @@ class _MainScreenState extends State<MainScreen>
     final x = cos(lat1) * sin(lat2) - sin(lat1) * cos(lat2) * cos(dLng);
     final bearing = atan2(y, x) * 180 / pi;
     return (bearing + 360) % 360;
+  }
+
+  /// 出発点から指定方位・距離の地点を返す（球面三角法・direct 解）。高緯度でも誤差少。
+  /// bearingDeg: 0=北, 90=東, 度。distanceMeters: メートル。
+  LatLng _destinationLatLng(LatLng from, double bearingDeg, double distanceMeters) {
+    const earthRadius = 6371000.0;
+    final delta = distanceMeters / earthRadius;
+    final theta = bearingDeg * pi / 180;
+    final phi1 = from.latitude * pi / 180;
+    final lambda1 = from.longitude * pi / 180;
+    final phi2 = asin(sin(phi1) * cos(delta) + cos(phi1) * sin(delta) * cos(theta));
+    final lambda2 = lambda1 +
+        atan2(
+          sin(theta) * sin(delta) * cos(phi1),
+          cos(delta) - sin(phi1) * sin(phi2),
+        );
+    return LatLng(phi2 * 180 / pi, lambda2 * 180 / pi);
   }
 
   /// 2方位の差を [0, 180] に正規化
