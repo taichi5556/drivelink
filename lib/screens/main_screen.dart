@@ -190,6 +190,10 @@ class _MainScreenState extends State<MainScreen>
   Timer? _demoReverseTimer;
   bool _demoReverseActive = false;
   static const Duration _demoReverseDuration = Duration(seconds: 7);
+  // Phase H-4: 90° 離脱シミュレーション（B-7 検証用）
+  Timer? _demoDeviateTimer;
+  bool _demoDeviateActive = false;
+  static const Duration _demoDeviateDuration = Duration(seconds: 15);
 
   // Phase B-6: 逆走検知 → 自動再検索
   // 速度 >= 18km/h かつ 走行方向と進路方向の角度差 >= 135° が連続3秒で確定 → _fetchRoute(reroute) 発火。
@@ -1745,7 +1749,7 @@ class _MainScreenState extends State<MainScreen>
   // 走行速度を 60km/h 等にしておけば 3秒経過時点で発火 → 残り 4秒で reroute 観測。
   void _triggerDemoReverse() {
     if (_demoSource == null || !_demoRunning) return;
-    if (_demoReverseActive) return;
+    if (_demoReverseActive || _demoDeviateActive) return; // H-4 と相互排他
     _demoReverseTimer?.cancel();
     _demoSource!.setBearingOffset(180);
     setState(() => _demoReverseActive = true);
@@ -1753,6 +1757,22 @@ class _MainScreenState extends State<MainScreen>
       if (!mounted) return;
       _demoSource?.setBearingOffset(0);
       setState(() => _demoReverseActive = false);
+    });
+  }
+
+  // Phase H-4: B-7 残り距離増加検知をデモ再現。bearing を +90° offset して 15秒維持 → 自動復帰。
+  // B-7 発火条件は最古サンプル 9秒以上経過 + 増加量 > 100m + 速度 > 5km/h。
+  // 60km/h で 15秒走行すれば 250m 移動するので、ルート直交方向に外れれば確実に 100m 増加を観測。
+  void _triggerDemoDeviate() {
+    if (_demoSource == null || !_demoRunning) return;
+    if (_demoDeviateActive || _demoReverseActive) return; // H-3 と相互排他
+    _demoDeviateTimer?.cancel();
+    _demoSource!.setBearingOffset(90);
+    setState(() => _demoDeviateActive = true);
+    _demoDeviateTimer = Timer(_demoDeviateDuration, () {
+      if (!mounted) return;
+      _demoSource?.setBearingOffset(0);
+      setState(() => _demoDeviateActive = false);
     });
   }
 
@@ -2572,6 +2592,7 @@ class _MainScreenState extends State<MainScreen>
     _appLinkSubscription?.cancel();
     // Phase H: デモモード関連タイマー / Stream
     _demoReverseTimer?.cancel();
+    _demoDeviateTimer?.cancel();
     _demoSource?.dispose();
     WidgetsBinding.instance.removeObserver(this);
     _markerAnimController?.removeListener(_onMarkerAnimTick);
@@ -3218,12 +3239,14 @@ class _MainScreenState extends State<MainScreen>
                     ),
                   ),
                   const SizedBox(height: 6),
-                  // Phase H-3: B-6 逆走検知の検証ボタン（走行中のみ押下可）
+                  // Phase H-3: B-6 逆走検知の検証ボタン（走行中のみ押下可、H-4 と相互排他）
                   SizedBox(
                     width: double.infinity,
                     height: 30,
                     child: ElevatedButton(
-                      onPressed: (_demoRunning && !_demoReverseActive)
+                      onPressed: (_demoRunning &&
+                              !_demoReverseActive &&
+                              !_demoDeviateActive)
                           ? _triggerDemoReverse
                           : null,
                       style: ElevatedButton.styleFrom(
@@ -3241,6 +3264,35 @@ class _MainScreenState extends State<MainScreen>
                       ),
                       child: Text(
                         _demoReverseActive ? '逆走中…' : '逆走 7秒（B-6）',
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  // Phase H-4: B-7 90° 離脱の検証ボタン（走行中のみ押下可、H-3 と相互排他）
+                  SizedBox(
+                    width: double.infinity,
+                    height: 30,
+                    child: ElevatedButton(
+                      onPressed: (_demoRunning &&
+                              !_demoDeviateActive &&
+                              !_demoReverseActive)
+                          ? _triggerDemoDeviate
+                          : null,
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: _demoDeviateActive
+                            ? Colors.deepOrange.shade300
+                            : Colors.deepOrange.shade400,
+                        foregroundColor: Colors.white,
+                        disabledBackgroundColor: Colors.grey.shade800,
+                        disabledForegroundColor: Colors.grey.shade500,
+                        padding: EdgeInsets.zero,
+                        textStyle: const TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      child: Text(
+                        _demoDeviateActive ? '離脱中…' : '90°離脱 15秒（B-7）',
                       ),
                     ),
                   ),
