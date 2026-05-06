@@ -52,6 +52,9 @@ class _SearchScreenState extends State<SearchScreen> {
   List<Map<String, dynamic>> _results = [];
   bool _isSearching = false;
   GoogleMapController? _mapController;
+  // 検索リクエストの世代カウンタ。HTTP 完了時に最新世代でなければ破棄する
+  // ことで、デバウンス＋ネットワーク遅延に伴う stale 結果の上書きを防ぐ。
+  int _searchSeq = 0;
 
   @override
   void dispose() {
@@ -72,6 +75,7 @@ class _SearchScreenState extends State<SearchScreen> {
 
   Future<void> _runSearch() async {
     if (!mounted) return;
+    final mySeq = ++_searchSeq;
     setState(() => _isSearching = true);
     try {
       final encoded = Uri.encodeComponent(_searchCtrl.text);
@@ -88,6 +92,7 @@ class _SearchScreenState extends State<SearchScreen> {
         final response = await request.close();
         final body = await response.transform(const Utf8Decoder()).join();
         final data = jsonDecode(body);
+        if (!mounted || mySeq != _searchSeq) return; // stale 検索は破棄
         if (data['status'] == 'OK') {
           final results = (data['results'] as List).take(20).map((r) {
             final loc = r['geometry']['location'];
@@ -98,14 +103,12 @@ class _SearchScreenState extends State<SearchScreen> {
               'lng': (loc['lng'] as num).toDouble(),
             };
           }).toList();
-          if (!mounted) return;
           setState(() {
             _results = List<Map<String, dynamic>>.from(results);
             _isSearching = false;
           });
           _fitMapToResults();
         } else {
-          if (!mounted) return;
           setState(() {
             _results = [];
             _isSearching = false;
@@ -115,7 +118,7 @@ class _SearchScreenState extends State<SearchScreen> {
         client.close();
       }
     } catch (_) {
-      if (!mounted) return;
+      if (!mounted || mySeq != _searchSeq) return;
       setState(() {
         _results = [];
         _isSearching = false;
@@ -225,17 +228,23 @@ class _SearchScreenState extends State<SearchScreen> {
         child: Column(
           children: [
             _buildSearchField(),
-            if (hasResults)
-              Expanded(
-                child: Column(
-                  children: [
-                    Expanded(flex: 3, child: _buildMap()),
-                    Expanded(flex: 2, child: _buildResultsList()),
-                  ],
-                ),
-              )
-            else
-              Expanded(child: _buildEmptyStateBody()),
+            // IndexedStack で結果ビュー / 空ビューの両方を常時マウント。GoogleMap を
+            // unmount→remount する経路を排除し、_mapController が常に有効になる
+            // （連続別ワード検索でピンが反映されないバグの根本対処）。
+            Expanded(
+              child: IndexedStack(
+                index: hasResults ? 0 : 1,
+                children: [
+                  Column(
+                    children: [
+                      Expanded(flex: 3, child: _buildMap()),
+                      Expanded(flex: 2, child: _buildResultsList()),
+                    ],
+                  ),
+                  _buildEmptyStateBody(),
+                ],
+              ),
+            ),
           ],
         ),
       ),
