@@ -103,10 +103,6 @@ class _SearchScreenState extends State<SearchScreen> {
             _results = List<Map<String, dynamic>>.from(results);
             _isSearching = false;
           });
-          // 結果到着時にキーボードを閉じて地図/リストの視認性を確保（0件時は再入力余地を残す）
-          if (results.isNotEmpty) {
-            FocusScope.of(context).unfocus();
-          }
           _fitMapToResults();
         } else {
           if (!mounted) return;
@@ -253,6 +249,7 @@ class _SearchScreenState extends State<SearchScreen> {
         controller: _searchCtrl,
         style: const TextStyle(color: Colors.white),
         autofocus: true,
+        textInputAction: TextInputAction.search,
         decoration: InputDecoration(
           hintText: '場所・お店・住所を検索...',
           hintStyle: const TextStyle(color: Colors.grey),
@@ -274,6 +271,8 @@ class _SearchScreenState extends State<SearchScreen> {
               borderSide: BorderSide(color: Color(0xFF00D4FF))),
         ),
         onChanged: _onQueryChanged,
+        // キーボードの「検索」ボタン押下時に閉じる（ユーザーの「入力完了」意思）
+        onSubmitted: (_) => FocusScope.of(context).unfocus(),
       ),
     );
   }
