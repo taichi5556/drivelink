@@ -2067,6 +2067,24 @@ class _MainScreenState extends State<MainScreen>
   }
 
   // Phase A-4: 「現在地へ戻る」ボタンのダブルタップで全メンバーが画面に収まる範囲にズーム。
+  /// Phase D-1: 現在地ボタンの onTap 共通処理。ナビ中・非ナビ両モードで同じ動き。
+  /// ナビ中はオフセット + 既存 bearing を維持、非ナビはズーム17の真俯瞰。
+  void _handleRecenterTap() {
+    final isNavigating = !_isRoutePreview && _routes.isNotEmpty;
+    setState(() {
+      _isFollowingMember = false;
+      _currentZoom = 17.0;
+    });
+    if (isNavigating) {
+      _animateCameraWithBearing(_myPosition, _currentBearing);
+    } else {
+      _animateCamera(
+        CameraUpdate.newLatLngZoom(_myPosition, 17.0),
+        programmatic: true,
+      );
+    }
+  }
+
   // - 自分から 10km 超のメンバーは除外し、SnackBar で通知
   // - tilt 0、bearing 0、padding 80 の真俯瞰
   // - _isFollowingMember=true を維持: GPS update のカメラ上書きをガード（行 1437/1479/1069）
@@ -2533,6 +2551,9 @@ class _MainScreenState extends State<MainScreen>
   }
 
   Widget _buildMap() {
+    // Phase D-1: ナビ中（!preview && routes 有り）はシートが下端を覆うため
+    // 現在地・ヘディングアップボタンを上方（bottom: 86）に逃がす。
+    final isNav = !_isRoutePreview && _routes.isNotEmpty;
     return Stack(
       children: [
         GoogleMap(
@@ -2616,31 +2637,37 @@ class _MainScreenState extends State<MainScreen>
           }
         },
         ),
-        // 現在地に戻るFAB（追従停止中のみ表示・ピル型・中央下）
-        if (_isFollowingMember)
+        // 現在地に戻るFAB（追従停止中のみ表示）。
+        // ナビ中：右下の 44x44 アイコン円（ヘディングアップと並列）
+        // 非ナビ：従来のピル型・中央下
+        if (_isFollowingMember && isNav)
+          Positioned(
+            // ヘディングアップ (right:12, w:44) の左隣に 8px 間隔で並べる → right: 12 + 44 + 8 = 64
+            right: 64,
+            bottom: 86,
+            child: GestureDetector(
+              onTap: _handleRecenterTap,
+              onDoubleTap: _zoomToAllMembers,
+              child: Container(
+                width: 44,
+                height: 44,
+                decoration: const BoxDecoration(
+                  color: Color(0xFF00D4FF),
+                  shape: BoxShape.circle,
+                  boxShadow: [BoxShadow(color: Colors.black26, blurRadius: 4)],
+                ),
+                child: const Icon(Icons.my_location, color: Colors.white, size: 22),
+              ),
+            ),
+          ),
+        if (_isFollowingMember && !isNav)
           Positioned(
             left: 0,
             right: 0,
             bottom: 24,
             child: Center(
               child: GestureDetector(
-                onTap: () {
-                  // Phase A-4: ナビ中はオフセット + tilt 60 維持で復帰、それ以外はズーム17の真俯瞰
-                  final isNavigating = !_isRoutePreview && _routes.isNotEmpty;
-                  setState(() {
-                    _isFollowingMember = false;
-                    _currentZoom = 17.0;
-                  });
-                  if (isNavigating) {
-                    _animateCameraWithBearing(_myPosition, _currentBearing);
-                  } else {
-                    _animateCamera(
-                      CameraUpdate.newLatLngZoom(_myPosition, 17.0),
-                      programmatic: true,
-                    );
-                  }
-                },
-                // Phase A-4: ダブルタップで全メンバーが画面に収まる範囲にズーム
+                onTap: _handleRecenterTap,
                 onDoubleTap: _zoomToAllMembers,
                 child: Container(
                   padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
@@ -2669,9 +2696,10 @@ class _MainScreenState extends State<MainScreen>
             ),
           ),
         // ヘディングアップ ON/OFF ボタン
+        // ナビ中はシート（折りたたみ ~70px）の上に逃がす（bottom: 86）
         Positioned(
           right: 12,
-          bottom: 12,
+          bottom: isNav ? 86 : 12,
           child: GestureDetector(
             onTap: () {
               final newVal = !_headingUp;
