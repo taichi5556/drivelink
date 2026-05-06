@@ -140,7 +140,7 @@ class _SearchScreenState extends State<SearchScreen> {
       });
       if (allNear) {
         _mapController!.animateCamera(
-          CameraUpdate.newLatLngZoom(widget.currentPosition, 14),
+          CameraUpdate.newLatLngZoom(widget.currentPosition, 12),
         );
         return;
       }
