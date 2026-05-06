@@ -176,6 +176,15 @@ class _MainScreenState extends State<MainScreen>
     Color(0xFF43A047), // 緑
   ];
 
+  // Phase D-1: ナビシート (DraggableScrollableSheet) 制御用。
+  // ナビ確定直後に展開→5秒で折りたたみ。ユーザー操作（指タップ）でタイマー即キャンセル。
+  final DraggableScrollableController _sheetController =
+      DraggableScrollableController();
+  Timer? _sheetAutoCollapseTimer;
+  // _buildNavigationSheet で計算した実 min/max を animateTo で再利用するためキャッシュ
+  double _sheetMinSize = 0.06;
+  double _sheetMaxSize = 0.40;
+
   // 逸脱判定調査用ログバッファ。最新200行保持。アプリ内ログ画面で表示。
   // 公開版にも入れて常時収集（メモリ消費は微小）。表示のオン/オフは _debugLogEnabled で制御。
   final List<String> _debugLogBuffer = [];
@@ -2280,6 +2289,9 @@ class _MainScreenState extends State<MainScreen>
     WidgetsBinding.instance.removeObserver(this);
     _markerAnimController?.removeListener(_onMarkerAnimTick);
     _markerAnimController?.dispose();
+    // Phase D-1: シート関連リソース
+    _sheetAutoCollapseTimer?.cancel();
+    _sheetController.dispose();
     _db.child('rooms/${widget.roomCode}/members/${widget.userId}').remove();
     _bannerAd?.dispose();
     super.dispose();
@@ -2821,14 +2833,11 @@ class _MainScreenState extends State<MainScreen>
             right: 70,
             child: _buildNavigationBanner(),
           ),
-        // Phase B-4: 下部到着予想カード（ナビ中のみ表示）。bottom-anchored。
+        // Phase D-1: ナビ中はマップ下部に DraggableScrollableSheet を出す。
+        // 折りたたみ：ハンドル + ETA 1行（時刻 / 残り時間 / 残り距離）
+        // 展開：ETA + 目的地名 + アクション 4ボタン
         if (!_isRoutePreview && _routes.isNotEmpty)
-          Positioned(
-            bottom: 8,
-            left: 8,
-            right: 8,
-            child: _buildArrivalCard(),
-          ),
+          _buildNavigationSheet(),
       ],
     );
   }
@@ -2931,6 +2940,8 @@ class _MainScreenState extends State<MainScreen>
     } else {
       _animateCamera(CameraUpdate.newLatLngZoom(_myPosition, 17.0), programmatic: true);
     }
+    // Phase D-1: ナビ確定直後 5秒間シート展開（ルート共有ボタンに即アクセス可能にする）
+    _expandSheetTemporarily();
   }
 
   // 「このルートで出発」: 自分のルートを確定してナビ開始。Firebase は触らない。
@@ -3069,6 +3080,13 @@ class _MainScreenState extends State<MainScreen>
   }
 
   Widget _buildBottomSection() {
+    // Phase D-1: ナビ中は4ボタンをシート内に表示するため下部側は非表示にする。
+    // 通知（_pendingNotifications）はナビ中でも安全のため残す（急減速 warning 等）。
+    final isNavigating = !_isRoutePreview && _routes.isNotEmpty;
+    // ナビ中で通知も無ければ section ごと省略してマップ領域を最大化
+    if (isNavigating && _pendingNotifications.isEmpty) {
+      return const SizedBox.shrink();
+    }
     return Container(
       color: _blinkVisible ? _blinkColor.withValues(alpha: 0.25) : const Color(0xFF0D1B2A),
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
@@ -3077,9 +3095,9 @@ class _MainScreenState extends State<MainScreen>
         children: [
           if (_pendingNotifications.isNotEmpty) ...[
             _buildNotificationBanners(),
-            const SizedBox(height: 4),
+            if (!isNavigating) const SizedBox(height: 4),
           ],
-          _buildActionButtons(),
+          if (!isNavigating) _buildActionButtons(),
         ],
       ),
     );
@@ -3271,12 +3289,12 @@ class _MainScreenState extends State<MainScreen>
           : '次の指示';
     }
 
+    // Phase D-1: ダークガラス化。ClipRRect で blur を適用、シャドウは ClipRRect 外側
+    // の親 Container に設定して可視性を確保（内側に置くとクリップされて見えない）。
     return Material(
       color: Colors.transparent,
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
         decoration: BoxDecoration(
-          color: const Color(0xFF0D1B2A).withValues(alpha: 0.92),
           borderRadius: BorderRadius.circular(12),
           boxShadow: [
             BoxShadow(
@@ -3286,105 +3304,213 @@ class _MainScreenState extends State<MainScreen>
             ),
           ],
         ),
-        child: Row(
-          children: [
-            Container(
-              width: 56,
-              height: 56,
-              decoration: const BoxDecoration(
-                color: Color(0xFF00D4FF),
-                shape: BoxShape.circle,
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(12),
+          child: BackdropFilter(
+            filter: ui.ImageFilter.blur(sigmaX: 35, sigmaY: 35),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              decoration: BoxDecoration(
+                color: const Color(0xFF0D1B2A).withValues(alpha: 0.30),
               ),
-              child: Icon(icon, color: Colors.black, size: 36),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
+              child: Row(
                 children: [
-                  Text(
-                    distanceText,
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 22,
-                      fontWeight: FontWeight.bold,
+                  Container(
+                    width: 56,
+                    height: 56,
+                    decoration: const BoxDecoration(
+                      color: Color(0xFF00D4FF),
+                      shape: BoxShape.circle,
                     ),
+                    child: Icon(icon, color: Colors.black, size: 36),
                   ),
-                  const SizedBox(height: 2),
-                  Text(
-                    instructionText,
-                    style: const TextStyle(color: Colors.white70, fontSize: 13),
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          distanceText,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 22,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          instructionText,
+                          style: const TextStyle(color: Colors.white70, fontSize: 13),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        // Phase D-1: 目的地名（B-4 シートから移設）。空名なら出さない。
+                        if (_groupDestName.isNotEmpty) ...[
+                          const SizedBox(height: 2),
+                          Row(
+                            children: [
+                              Icon(
+                                Icons.place,
+                                color: Colors.white.withValues(alpha: 0.5),
+                                size: 11,
+                              ),
+                              const SizedBox(width: 3),
+                              Expanded(
+                                child: Text(
+                                  _groupDestName,
+                                  style: TextStyle(
+                                    color: Colors.white.withValues(alpha: 0.5),
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w400,
+                                  ),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ],
+                    ),
                   ),
                 ],
               ),
             ),
-          ],
+          ),
         ),
       ),
     );
   }
 
-  /// Phase B-4: 下部到着予想カード。ナビ中（!preview && _routes.isNotEmpty）のみ表示。
-  /// 1行目：📍 + 目的地名（ellipsis）
-  /// 2行目：到着時刻 • あと残り時間 • 残り距離
-  Widget _buildArrivalCard() {
-    if (_isRoutePreview || _routes.isEmpty) return const SizedBox.shrink();
-    if (_selectedRouteIndex < 0 || _selectedRouteIndex >= _routes.length) {
-      return const SizedBox.shrink();
-    }
+  /// Phase D-1: ナビ中の DraggableScrollableSheet（Apple マップ風 frosted glass）。
+  /// 折りたたみ：ハンドル + ETA 1行（時刻 / 残り時間 / 残り距離）
+  /// 展開：ETA行 + アクション 4ボタン（目的地名は B-3 ナビバナーで表示）
+  /// 高さ比率は LayoutBuilder で実 Stack 高さから px 換算。
+  /// _sheetController で animateTo を可能にし、ユーザーのタップで自動折りたたみタイマーをキャンセル。
+  Widget _buildNavigationSheet() {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final parentH = constraints.maxHeight;
+        // 折りたたみ ~70px（ハンドル + ETA行 + 余白）/ 展開 ~180px（ハンドル + ETA + 4ボタン + 余白）
+        final minSize = (70.0 / parentH).clamp(0.06, 0.4);
+        final maxSize = (180.0 / parentH).clamp(0.12, 0.6);
+        // _expandSheetTemporarily 用にキャッシュ
+        _sheetMinSize = minSize;
+        _sheetMaxSize = maxSize;
+        return Listener(
+          behavior: HitTestBehavior.translucent,
+          onPointerDown: (_) {
+            // ユーザーが触れた瞬間に自動折りたたみタイマーをキャンセル（ドラッグ完了待ち不要）
+            if (_sheetAutoCollapseTimer?.isActive ?? false) {
+              _sheetAutoCollapseTimer?.cancel();
+              _sheetAutoCollapseTimer = null;
+            }
+          },
+          child: DraggableScrollableSheet(
+            controller: _sheetController,
+            initialChildSize: minSize,
+            minChildSize: minSize,
+            maxChildSize: maxSize,
+            snap: true,
+            snapSizes: [minSize, maxSize],
+            builder: (context, scrollController) =>
+                _buildSheetBody(scrollController),
+          ),
+        );
+      },
+    );
+  }
+
+  /// Phase D-1: ナビ確定直後にシートを展開状態にし、5秒後に折りたたみへ自動復帰。
+  /// 5秒の間にユーザーが指で触れたら Listener 経由でタイマーキャンセル（自動復帰なし）。
+  /// controller の attach は次フレーム以降のため post-frame で実行。
+  void _expandSheetTemporarily() {
+    if (_isRoutePreview || _routes.isEmpty) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!_sheetController.isAttached) return;
+      _sheetController.animateTo(
+        _sheetMaxSize,
+        duration: const Duration(milliseconds: 350),
+        curve: Curves.easeOutCubic,
+      );
+      _sheetAutoCollapseTimer?.cancel();
+      _sheetAutoCollapseTimer = Timer(const Duration(seconds: 5), () {
+        if (!_sheetController.isAttached) return;
+        _sheetController.animateTo(
+          _sheetMinSize,
+          duration: const Duration(milliseconds: 350),
+          curve: Curves.easeOutCubic,
+        );
+      });
+    });
+  }
+
+  /// Phase D-1: シート内コンテンツ。ListView で `scrollController` を受けることで
+  /// DraggableScrollableSheet のドラッグ判定が正しく動く（中身は実質スクロールしない）。
+  /// すりガラス感を強めるため白α0.7 + blur sigma 30。
+  Widget _buildSheetBody(ScrollController scrollController) {
     final remDist = _remainingDistanceMeters();
     final remDur = _remainingDurationSeconds();
     final eta = _formatEta(remDur);
     final dur = _formatRemainingDuration(remDur);
     final dist = _formatRemainingDistance(remDist);
-    final destName = _groupDestName.isEmpty ? '目的地' : _groupDestName;
 
-    return Material(
-      color: Colors.transparent,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-        decoration: BoxDecoration(
-          color: const Color(0xFF0D1B2A).withValues(alpha: 0.92),
-          borderRadius: BorderRadius.circular(12),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withValues(alpha: 0.4),
-              blurRadius: 8,
-              offset: const Offset(0, 2),
+    // 透明度を上げた背景でも読めるよう文字は黒寄り＋太字
+    const primaryColor = Color(0xFF000000);
+    const flatTextStyle = TextStyle(
+      color: primaryColor,
+      fontSize: 22,
+      fontWeight: FontWeight.w700,
+      letterSpacing: -0.3,
+    );
+
+    return ClipRRect(
+      borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+      child: BackdropFilter(
+        filter: ui.ImageFilter.blur(sigmaX: 40, sigmaY: 40),
+        child: Container(
+          decoration: BoxDecoration(
+            color: Colors.white.withValues(alpha: 0.25),
+            border: Border(
+              top: BorderSide(
+                color: Colors.white.withValues(alpha: 0.5),
+                width: 0.5,
+              ),
             ),
-          ],
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                const Icon(Icons.place, color: Color(0xFF00D4FF), size: 18),
-                const SizedBox(width: 6),
-                Expanded(
-                  child: Text(
-                    destName,
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 15,
-                      fontWeight: FontWeight.bold,
-                    ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
+          ),
+          child: ListView(
+            controller: scrollController,
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+            children: [
+              // ハンドル
+              Center(
+                child: Container(
+                  width: 36,
+                  height: 5,
+                  margin: const EdgeInsets.only(top: 8, bottom: 10),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFC7C7CC),
+                    borderRadius: BorderRadius.circular(2.5),
                   ),
                 ),
-              ],
-            ),
-            const SizedBox(height: 4),
-            Text(
-              '$eta  •  あと$dur  •  $dist',
-              style: const TextStyle(color: Colors.white70, fontSize: 13),
-            ),
-          ],
+              ),
+              // ETA 行（時刻 / 残り時間 / 残り距離 横一列）
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                crossAxisAlignment: CrossAxisAlignment.baseline,
+                textBaseline: TextBaseline.alphabetic,
+                children: [
+                  Text(eta, style: flatTextStyle),
+                  Text(dur, style: flatTextStyle),
+                  Text(dist, style: flatTextStyle),
+                ],
+              ),
+              const SizedBox(height: 14),
+              // アクション 4ボタン（既存ヘルパー流用、展開時のみ視認）
+              _buildActionButtons(),
+            ],
+          ),
         ),
       ),
     );
