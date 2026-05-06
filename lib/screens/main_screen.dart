@@ -15,6 +15,8 @@ import 'package:google_mobile_ads/google_mobile_ads.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../services/room_history.dart';
 import '../services/tts_service.dart';
+// Phase H-1: デモモード（リリース前 revert 予定）
+import '../services/demo_location_source.dart';
 import 'login_screen.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:app_links/app_links.dart';
@@ -175,6 +177,12 @@ class _MainScreenState extends State<MainScreen>
   static const Duration _distHistoryDuration = Duration(seconds: 10);
   static const double _distIncreaseThresholdMeters = 100.0;
   static const double _distIncreaseSpeedMps = 5.0 / 3.6; // 5 km/h
+
+  // Phase H-1: デモモード（リリース前 revert 予定）
+  // ON にすると Geolocator の代わりに DemoLocationSource からの合成 Position を購読。
+  // _handlePositionUpdate 以降のロジックは無改修で動作する。
+  bool _demoMode = false;
+  DemoLocationSource? _demoSource;
 
   // Phase B-6: 逆走検知 → 自動再検索
   // 速度 >= 18km/h かつ 走行方向と進路方向の角度差 >= 135° が連続3秒で確定 → _fetchRoute(reroute) 発火。
@@ -1593,59 +1601,87 @@ class _MainScreenState extends State<MainScreen>
   }
 
   void _startLocationStream() {
-    _locationSubscription = Geolocator.getPositionStream(
-      locationSettings: _buildLocationSettings(),
-    ).listen((pos) async {
-      if (!mounted) return;
-      final newPos = LatLng(pos.latitude, pos.longitude);
-      // Phase B-5: 自車マーカーの tween を駆動（生 _myPosition は別途 setState で更新）
-      // 初回はデフォルト東京座標から長距離 tween しないようスナップ。
-      if (!_hasFirstFix) {
-        _hasFirstFix = true;
-        _displayMyPosition = newPos;
-        _animFrom = newPos;
-        _animTo = newPos;
+    // Phase H-1: デモモード ON なら DemoLocationSource からの合成 Stream を購読、
+    // OFF（通常）なら従来通り Geolocator から購読。ハンドラ本体（_handlePositionUpdate）は共通。
+    if (_demoMode && _demoSource != null) {
+      _locationSubscription = _demoSource!.stream.listen(
+        _handlePositionUpdate,
+        onError: (e) => debugPrint('デモ位置情報ストリームエラー: $e'),
+      );
+    } else {
+      _locationSubscription = Geolocator.getPositionStream(
+        locationSettings: _buildLocationSettings(),
+      ).listen(
+        _handlePositionUpdate,
+        onError: (e) => debugPrint('位置情報ストリームエラー: $e'),
+      );
+    }
+  }
+
+  Future<void> _handlePositionUpdate(Position pos) async {
+    if (!mounted) return;
+    final newPos = LatLng(pos.latitude, pos.longitude);
+    // Phase B-5: 自車マーカーの tween を駆動（生 _myPosition は別途 setState で更新）
+    // 初回はデフォルト東京座標から長距離 tween しないようスナップ。
+    if (!_hasFirstFix) {
+      _hasFirstFix = true;
+      _displayMyPosition = newPos;
+      _animFrom = newPos;
+      _animTo = newPos;
+    } else {
+      _animFrom = _displayMyPosition;
+      _animTo = newPos;
+      _markerAnimController?.forward(from: 0);
+    }
+    setState(() => _myPosition = newPos);
+    final spd = pos.speed;
+    // 負値（取得不可）は 0 扱い。bearing ガードの外で常に更新
+    _currentSpeed = spd > 0 ? spd : 0.0;
+    // Phase F-1: 速度 >= 2km/h の時のみ bearing 更新（停車・徐行で画面回転を抑止）。
+    // 走り出したら自動で反映再開、ヘディングアップで自然に追従する。
+    if (spd > _bearingUpdateMinSpeedMps && pos.heading >= 0) {
+      _currentBearing = pos.heading;
+    }
+    if (_shareLocation) {
+      await _db.child('rooms/${widget.roomCode}/members/${widget.userId}').update({
+        'nickname': widget.nickname,
+        'lat': pos.latitude,
+        'lng': pos.longitude,
+        'vehicle_type': widget.vehicleType,
+        'last_seen': DateTime.now().millisecondsSinceEpoch,
+      });
+    }
+    if (!mounted) return;
+    // 追従停止中（_isFollowingMember==true）はヘディングアップでもカメラを動かさない
+    if (!_inRouteOverview && !_isFollowingMember) {
+      if (_headingUp) {
+        _moveCameraWithBearing(_myPosition, _currentBearing);
       } else {
-        _animFrom = _displayMyPosition;
-        _animTo = newPos;
-        _markerAnimController?.forward(from: 0);
+        _animateCamera(CameraUpdate.newLatLng(_myPosition), programmatic: true);
       }
-      setState(() => _myPosition = newPos);
-      final spd = pos.speed;
-      // 負値（取得不可）は 0 扱い。bearing ガードの外で常に更新
-      _currentSpeed = spd > 0 ? spd : 0.0;
-      // Phase F-1: 速度 >= 2km/h の時のみ bearing 更新（停車・徐行で画面回転を抑止）。
-      // 走り出したら自動で反映再開、ヘディングアップで自然に追従する。
-      if (spd > _bearingUpdateMinSpeedMps && pos.heading >= 0) {
-        _currentBearing = pos.heading;
-      }
-      if (_shareLocation) {
-        await _db.child('rooms/${widget.roomCode}/members/${widget.userId}').update({
-          'nickname': widget.nickname,
-          'lat': pos.latitude,
-          'lng': pos.longitude,
-          'vehicle_type': widget.vehicleType,
-          'last_seen': DateTime.now().millisecondsSinceEpoch,
-        });
-      }
-      if (!mounted) return;
-      // 追従停止中（_isFollowingMember==true）はヘディングアップでもカメラを動かさない
-      if (!_inRouteOverview && !_isFollowingMember) {
-        if (_headingUp) {
-          _moveCameraWithBearing(_myPosition, _currentBearing);
-        } else {
-          _animateCamera(CameraUpdate.newLatLng(_myPosition), programmatic: true);
-        }
-      }
-      _checkRouteDeviation();
-      _updatePassedRoute();
-      _updateCurrentStep(); // B-2: ステップ判定（投影方式 + 3秒デバウンス）
-      _updateReverseDetection(); // B-6: 逆走検知（_currentStepIndex を使うため後）
-      _updateVoiceGuidance(); // C-2: 音声案内（500/100/30m tier で読み上げ）
-      _updateRemainingDistanceCheck(); // B-7: 残り距離増加検知（90° ズレ補完）
-    }, onError: (e) {
-      debugPrint('位置情報ストリームエラー: $e');
-    });
+    }
+    _checkRouteDeviation();
+    _updatePassedRoute();
+    _updateCurrentStep(); // B-2: ステップ判定（投影方式 + 3秒デバウンス）
+    _updateReverseDetection(); // B-6: 逆走検知（_currentStepIndex を使うため後）
+    _updateVoiceGuidance(); // C-2: 音声案内（500/100/30m tier で読み上げ）
+    _updateRemainingDistanceCheck(); // B-7: 残り距離増加検知（90° ズレ補完）
+  }
+
+  // Phase H-1: デモモード ON/OFF 切替。位置購読をシミュレータ ⇄ 実 GPS で差し替える。
+  void _toggleDemoMode() {
+    _locationSubscription?.cancel();
+    _locationSubscription = null;
+    if (!_demoMode) {
+      _demoSource = DemoLocationSource(_myPosition);
+      _demoSource!.start();
+      setState(() => _demoMode = true);
+    } else {
+      _demoSource?.dispose();
+      _demoSource = null;
+      setState(() => _demoMode = false);
+    }
+    _startLocationStream();
   }
 
   Future<void> _updateLocation() async {
@@ -3024,6 +3060,34 @@ class _MainScreenState extends State<MainScreen>
         // 展開：ETA + 目的地名 + アクション 4ボタン
         if (!_isRoutePreview && _routes.isNotEmpty)
           _buildNavigationSheet(),
+        // Phase H-1: デモモード切替 FAB（リリース前 revert 予定）。
+        // メンバーリスト（top:6）と案内バナー（top:8 height≈80）を避けて top:90 に配置。
+        Positioned(
+          right: 12,
+          top: 90,
+          child: GestureDetector(
+            onTap: _toggleDemoMode,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              decoration: BoxDecoration(
+                color: _demoMode ? Colors.redAccent : Colors.grey.shade700,
+                borderRadius: BorderRadius.circular(16),
+                boxShadow: const [
+                  BoxShadow(color: Colors.black38, blurRadius: 4),
+                ],
+              ),
+              child: Text(
+                _demoMode ? 'DEMO ON' : 'DEMO',
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 0.5,
+                ),
+              ),
+            ),
+          ),
+        ),
       ],
     );
   }
