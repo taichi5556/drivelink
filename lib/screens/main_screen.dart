@@ -3876,7 +3876,12 @@ class _MainScreenState extends State<MainScreen>
                               const SizedBox(width: 3),
                               Expanded(
                                 child: Text(
-                                  _groupDestName,
+                                  // 経由地ありなら「次の経由地 → 目的地」を表示。
+                                  // 通過判定で _waypointNames は順次先頭から
+                                  // 削除されるため、_waypointNames[0] が常に次の経由地。
+                                  _waypointNames.isEmpty
+                                      ? _groupDestName
+                                      : '${_waypointNames[0]} → $_groupDestName',
                                   style: TextStyle(
                                     color: Colors.white.withValues(alpha: 0.5),
                                     fontSize: 11,
