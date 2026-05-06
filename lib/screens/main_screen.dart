@@ -1264,6 +1264,14 @@ class _MainScreenState extends State<MainScreen>
                 if (_selectedRouteIndex >= newRoutes.length) {
                   _selectedRouteIndex = 0;
                 }
+                // 再検索でルート構造が変わるため step / 音声 state をリセット。
+                // 残したままだと _lastVoiceStepIdx が新ルートの step と偶然一致して
+                // 「step 突入」と判定されず音声案内が完全に鳴らないケースがある。
+                _currentStepIndex = 0;
+                _pendingStepIndex = null;
+                _pendingSince = null;
+                _lastVoiceStepIdx = -1;
+                _announcedTiers = <int>{};
               } else {
                 _selectedRouteIndex = 0;
               }
@@ -1929,7 +1937,8 @@ class _MainScreenState extends State<MainScreen>
 
   /// Phase C-2: 音声案内のトリガー。GPS 更新ごとに呼ぶ。
   /// 現 step の終了点（次の曲がり地点）までの距離を 500m / 100m / 30m の tier 判定で読み上げ。
-  /// step 切替時に _announcedTiers をリセット、開始時点で既に通過済みの tier は announced 扱い（plan A）。
+  /// step 切替時：突入時の残距離バンドに応じて 1 メッセージを即時発話（短い step / 再検索後でも
+  /// 必ず 1 発話を担保）。残りの tier は通常通り順次発火。
   /// keep-* / null（直進）maneuver は発話せずスキップ。1 tick で発火する tier は直近 1 つのみ。
   void _updateVoiceGuidance() {
     if (_isRoutePreview || _routes.isEmpty) {
@@ -1944,25 +1953,49 @@ class _MainScreenState extends State<MainScreen>
     final i = _currentStepIndex.clamp(0, steps.length - 1);
     final isLast = i >= steps.length - 1;
 
-    // step 切替時：tier をリセットし、開始時点で既に切っている tier を「announced 済」に登録
-    if (i != _lastVoiceStepIdx) {
-      _lastVoiceStepIdx = i;
-      _announcedTiers = <int>{};
-      final initDist = _distanceAlongStepToEnd(_myPosition, steps[i]);
-      if (initDist < 500) _announcedTiers.add(500);
-      if (initDist < 100) _announcedTiers.add(100);
-      if (initDist < 30) _announcedTiers.add(30);
-
-      // [調査支援] 次 step の maneuver と発話判定結果をログ出力（発話漏れ追跡用）
-      final nextManeuver = isLast ? '(末尾step)' : (steps[i + 1].maneuver ?? '(null=直進)');
-      final resolved = isLast ? '目的地' : (_maneuverToJa(steps[i + 1].maneuver) ?? '(無音)');
-      _appendDebugLog('[音声] step=$i / maneuver=$nextManeuver → $resolved / initDist=${initDist.toStringAsFixed(0)}m');
-    }
-
     // 末尾 step は「目的地」固定、それ以外は次 step の maneuver から日本語生成
     final String? maneuverJa = isLast
         ? '目的地'
         : _maneuverToJa(steps[i + 1].maneuver);
+
+    // step 切替時：突入バンドに応じて即時発話 + 通過済み tier を事前マーク
+    if (i != _lastVoiceStepIdx) {
+      _lastVoiceStepIdx = i;
+      _announcedTiers = <int>{};
+      final initDist = _distanceAlongStepToEnd(_myPosition, steps[i]);
+
+      String? immediateText;
+      Set<int> preMarked = <int>{};
+      if (maneuverJa != null) {
+        if (initDist < 30) {
+          // < 30m: 直前案内を即時発話、以降の tier は全部抑止
+          immediateText = isLast ? '目的地に到着しました' : '$maneuverJaです';
+          preMarked = {500, 100, 30};
+        } else if (initDist < 500) {
+          // 30〜500m: 「まもなく〜」を即時発話、30m tier のみ後で監視
+          immediateText = isLast ? 'まもなく目的地' : 'まもなく$maneuverJa';
+          preMarked = {500, 100};
+        }
+        // initDist >= 500m: 即時発話なし、500/100/30 を順次発火（既存挙動）
+      }
+      _announcedTiers.addAll(preMarked);
+
+      // [調査支援] 即時発話の有無 / 事前スキップ tier を記録
+      final nextManeuver = isLast ? '(末尾step)' : (steps[i + 1].maneuver ?? '(null=直進)');
+      final resolved = maneuverJa ?? '(無音)';
+      _appendDebugLog(
+        '[音声] step=$i / maneuver=$nextManeuver → $resolved'
+        ' / initDist=${initDist.toStringAsFixed(0)}m'
+        ' / 即時発話=${immediateText ?? "なし"}'
+        ' / 事前スキップtier=$preMarked',
+      );
+
+      if (immediateText != null) {
+        TtsService.instance.speak(immediateText);
+        return; // 即時発話したらこの tick の tier 判定はスキップ
+      }
+    }
+
     if (maneuverJa == null) return; // keep-* / null（直進）はスキップ
 
     final distance = _distanceAlongStepToEnd(_myPosition, steps[i]);
@@ -1978,7 +2011,34 @@ class _MainScreenState extends State<MainScreen>
       TtsService.instance.speak(text);
     } else if (distance < 500 && !_announcedTiers.contains(500)) {
       _announcedTiers.add(500);
-      final text = isLast ? '500m先、目的地です' : '500m先、$maneuverJaです';
+      // 連続交差点の先読み: 直前案内の曲がり後、200m 以内に次の曲がりがあれば追記。
+      // 直進系（_maneuverToJa が null）step は中継として無視し累積距離で判定。
+      // 末尾 step（arrive）は j+1 < length で除外 → 「次は目的地」化を回避。
+      String? lookaheadJa;
+      double lookaheadDist = 0;
+      if (!isLast) {
+        for (int j = i + 1; j + 1 < steps.length; j++) {
+          lookaheadDist += steps[j].distanceMeters.toDouble();
+          if (lookaheadDist > 200) break;
+          final cand = _maneuverToJa(steps[j + 1].maneuver);
+          if (cand != null) {
+            lookaheadJa = cand;
+            break;
+          }
+        }
+      }
+      final String text;
+      if (isLast) {
+        text = '500m先、目的地です';
+      } else if (lookaheadJa != null) {
+        text = '500m先、$maneuverJaです。そのあとすぐ$lookaheadJaです';
+        _appendDebugLog(
+          '[音声] 500m先読み: 現=$maneuverJa / 次=$lookaheadJa'
+          ' / 次step長=${lookaheadDist.toStringAsFixed(0)}m',
+        );
+      } else {
+        text = '500m先、$maneuverJaです';
+      }
       TtsService.instance.speak(text);
     }
   }
