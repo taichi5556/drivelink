@@ -1188,7 +1188,11 @@ class _MainScreenState extends State<MainScreen>
       _waypointNames.add(name);
     });
     _rebuildMarkers();              // 経由地マーカーを即時表示
-    await _fetchRoute(_groupDestination!);  // 経由地込みで再計算
+    // 経由地追加はリルート扱い：カメラ広域動作・選択index リセット・5秒タイマー等の
+    // 「新規目的地検索」副作用を回避し、ナビ/プレビューの state を保全する。
+    // step/voice state は新ルート向けに自動リセットされ整合。force=true で
+    // _rerouteInFlight 中でも確実に反映。
+    await _fetchRoute(_groupDestination!, isRerouting: true, force: true);
     if (mounted) {
       _rebuildMarkers();            // 防御的: fetch 完了後の最終状態でも再描画
       _appendDebugLog(
