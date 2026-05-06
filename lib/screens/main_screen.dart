@@ -3600,8 +3600,9 @@ class _MainScreenState extends State<MainScreen>
     ];
   }
 
-  // 縦画面 bottom 用：横並び 4ボタン x 2段（2段目に 2D/3D + 準備中×3）
+  // 縦画面 bottom 用：横並び 4ボタン（ナビ中のみ 2段目 [2D/3D + 準備中×3] を追加表示）
   Widget _buildActionButtons() {
+    final isNavigating = !_isRoutePreview && _routes.isNotEmpty;
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
       child: LayoutBuilder(
@@ -3612,7 +3613,6 @@ class _MainScreenState extends State<MainScreen>
               ((constraints.maxWidth - spacing * (buttonCount - 1)) / buttonCount)
                   .clamp(60.0, 100.0);
           final items = _buildActionButtonItems(btnWidth);
-          final items2 = _buildActionButtonItems2(btnWidth);
           Widget rowOf(List<Widget> ws) => Row(
                 mainAxisAlignment: MainAxisAlignment.start,
                 children: [
@@ -3626,8 +3626,10 @@ class _MainScreenState extends State<MainScreen>
             mainAxisSize: MainAxisSize.min,
             children: [
               rowOf(items),
-              const SizedBox(height: spacing),
-              rowOf(items2),
+              if (isNavigating) ...[
+                const SizedBox(height: spacing),
+                rowOf(_buildActionButtonItems2(btnWidth)),
+              ],
             ],
           );
         },
@@ -3635,12 +3637,13 @@ class _MainScreenState extends State<MainScreen>
     );
   }
 
-  // 横画面 左帯用：縦並び 8ボタン（1段目4 + 2段目4、SingleChildScrollView でスクロール対応済）
+  // 横画面 左帯用：縦並び 4ボタン（ナビ中のみ 2段目を縦に追加で計8ボタン）
   Widget _buildActionButtonsVertical() {
+    final isNavigating = !_isRoutePreview && _routes.isNotEmpty;
     const double spacing = 8.0;
     final items = [
       ..._buildActionButtonItems(60.0),
-      ..._buildActionButtonItems2(60.0),
+      if (isNavigating) ..._buildActionButtonItems2(60.0),
     ];
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
