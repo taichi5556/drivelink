@@ -16,6 +16,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../services/room_history.dart';
 import '../services/tts_service.dart';
 import 'login_screen.dart';
+import 'search_screen.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:app_links/app_links.dart';
 import 'package:flutter_polyline_points/flutter_polyline_points.dart';
@@ -1418,177 +1419,42 @@ class _MainScreenState extends State<MainScreen>
   // ── ここまで目的地履歴 ────────────────────────────────────────
 
   Future<void> _setPersonalDestination() async {
-    final TextEditingController searchCtrl = TextEditingController();
-    List<Map<String, dynamic>> searchResults = [];
-    List<Map<String, dynamic>> history = await _loadDestHistory();
-    bool isSearching = false;
-    const placesApiKey = 'AIzaSyChuUZypiVhojgCO6ZgZML-ZW3eYLtti5c';
-
-    void selectDest(BuildContext ctx, String name, double lat, double lng) {
-      _searchDebounceTimer?.cancel(); // 進行中のデバウンスを止めてダイアログ閉じ後の遅延発火を防ぐ
+    final history = await _loadDestHistory();
+    if (!mounted) return;
+    final result = await Navigator.push<SearchResultAction>(
+      context,
+      MaterialPageRoute(builder: (_) => SearchScreen(
+        currentPosition: _myPosition,
+        hasGpsFix: _hasGpsFix,
+        history: history,
+        hasActiveDestination: _groupDestination != null,
+        placesApiKey: 'AIzaSyChuUZypiVhojgCO6ZgZML-ZW3eYLtti5c',
+      )),
+    );
+    if (!mounted || result == null) return;
+    if (result.type == 'destination') {
       setState(() {
-        _groupDestination = LatLng(lat, lng);
-        _groupDestName = name;
+        _groupDestination = LatLng(result.lat!, result.lng!);
+        _groupDestName = result.name!;
         _isRoutePreview = true;
         // 新規目的地検索時は「高速優先」にリセット。
         // 前回「一般道優先」のまま検索すると意図せず狭い道が選ばれることがあるため。
         _routePreference = 'highway';
       });
       _updateDestinationMarker();
-      _saveDestHistory(name, lat, lng);
-      Navigator.pop(ctx);
+      // 「現在地」は履歴に保存しない（既存挙動踏襲）
+      if (result.name != '現在地') {
+        _saveDestHistory(result.name!, result.lat!, result.lng!);
+      }
+    } else if (result.type == 'reset') {
+      setState(() {
+        _groupDestination = null;
+        _groupDestName = '';
+        _isRoutePreview = false;
+        _isShared = false;
+      });
+      _updateDestinationMarker();
     }
-
-    if (!mounted) return;
-    await showDialog(
-      context: context,
-      barrierDismissible: true,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setStateDialog) => AlertDialog(
-          // 横画面（縦の利用可能領域が狭い）でも検索結果と「現在地を目的地に設定」が
-          // 全部見えるよう、ダイアログ全体を縦スクロール可能にする
-          scrollable: true,
-          backgroundColor: const Color(0xFF0D1B2A),
-          title: const Text('🔍 目的地を検索', style: TextStyle(color: Colors.white)),
-          content: SizedBox(
-            width: double.maxFinite,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                TextField(
-                  controller: searchCtrl,
-                  style: const TextStyle(color: Colors.white),
-                  autofocus: true,
-                  decoration: InputDecoration(
-                    hintText: '場所・お店・住所を検索...',
-                    hintStyle: const TextStyle(color: Colors.grey),
-                    prefixIcon: const Icon(Icons.search, color: Color(0xFF00D4FF)),
-                    suffixIcon: isSearching
-                        ? const SizedBox(width: 20, height: 20, child: Padding(padding: EdgeInsets.all(12), child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFF00D4FF))))
-                        : null,
-                    enabledBorder: const UnderlineInputBorder(borderSide: BorderSide(color: Colors.grey)),
-                    focusedBorder: const UnderlineInputBorder(borderSide: BorderSide(color: Color(0xFF00D4FF))),
-                  ),
-                  onChanged: (val) {
-                    // C: デバウンス（300ms）。連打時の API 浪費 + race condition 抑制。
-                    _searchDebounceTimer?.cancel();
-                    if (val.length < 2) {
-                      setStateDialog(() => searchResults = []);
-                      return;
-                    }
-                    _searchDebounceTimer = Timer(const Duration(milliseconds: 300), () async {
-                      setStateDialog(() => isSearching = true);
-                      try {
-                        final encoded = Uri.encodeComponent(val);
-                        // B: ロケーションバイアス（一度でも GPS fix 済みの時のみ。未取得時は全国検索にフォールバック）
-                        final biasParam = _hasGpsFix
-                            ? '&location=${_myPosition.latitude},${_myPosition.longitude}&radius=50000'
-                            : '';
-                        final url = 'https://maps.googleapis.com/maps/api/place/textsearch/json'
-                            '?query=$encoded&language=ja&region=jp$biasParam&key=$placesApiKey';
-                        final client = HttpClient();
-                        try {
-                          final request = await client.getUrl(Uri.parse(url));
-                          final response = await request.close();
-                          final body = await response.transform(const Utf8Decoder()).join();
-                          final data = jsonDecode(body);
-                          if (data['status'] == 'OK') {
-                            // A: 表示件数 5 → 20 件
-                            final results = (data['results'] as List).take(20).map((r) {
-                              final loc = r['geometry']['location'];
-                              return {
-                                'name': r['name'] as String,
-                                'address': r['formatted_address'] as String? ?? '',
-                                'lat': (loc['lat'] as num).toDouble(),
-                                'lng': (loc['lng'] as num).toDouble(),
-                              };
-                            }).toList();
-                            setStateDialog(() {
-                              searchResults = List<Map<String, dynamic>>.from(results);
-                              isSearching = false;
-                            });
-                          } else {
-                            setStateDialog(() { searchResults = []; isSearching = false; });
-                          }
-                        } finally {
-                          client.close();
-                        }
-                      } catch (e) {
-                        setStateDialog(() { searchResults = []; isSearching = false; });
-                      }
-                    });
-                  },
-                ),
-                // 履歴（検索結果がないときだけ表示）
-                if (searchResults.isEmpty && history.isNotEmpty) ...[
-                  const SizedBox(height: 10),
-                  Row(children: [
-                    const Icon(Icons.history, color: Colors.grey, size: 14),
-                    const SizedBox(width: 4),
-                    const Text('最近の目的地', style: TextStyle(color: Colors.grey, fontSize: 11)),
-                  ]),
-                  const SizedBox(height: 4),
-                  ...history.map((h) => ListTile(
-                    dense: true,
-                    contentPadding: EdgeInsets.zero,
-                    leading: const Icon(Icons.history, color: Color(0xFF6680AA), size: 18),
-                    title: Text(h['name'] as String, style: const TextStyle(color: Colors.white70, fontSize: 13)),
-                    onTap: () => selectDest(ctx, h['name'] as String, h['lat'] as double, h['lng'] as double),
-                  )),
-                ],
-                const SizedBox(height: 4),
-                // 検索結果は最大5件のため Column に展開（AlertDialog.scrollable=true との競合回避）
-                if (searchResults.isNotEmpty)
-                  ...searchResults.map((r) => ListTile(
-                        leading: const Icon(Icons.place, color: Color(0xFF00D4FF)),
-                        title: Text(r['name'], style: const TextStyle(color: Colors.white, fontSize: 14)),
-                        subtitle: Text(r['address'], style: const TextStyle(color: Colors.grey, fontSize: 11), maxLines: 1, overflow: TextOverflow.ellipsis),
-                        onTap: () => selectDest(ctx, r['name'] as String, r['lat'] as double, r['lng'] as double),
-                      )),
-                const SizedBox(height: 4),
-                TextButton.icon(
-                  icon: const Icon(Icons.my_location, color: Color(0xFF00D4FF), size: 18),
-                  label: const Text('現在地を目的地に設定', style: TextStyle(color: Color(0xFF00D4FF))),
-                  onPressed: () {
-                    setState(() {
-                      _groupDestination = _myPosition;
-                      _groupDestName = '現在地';
-                      _isRoutePreview = true;
-                      _routePreference = 'highway';
-                    });
-                    _updateDestinationMarker();
-                    Navigator.pop(ctx);
-                  },
-                ),
-              ],
-            ),
-          ),
-          actions: [
-            if (_groupDestination != null)
-              TextButton(
-                onPressed: () {
-                  setState(() {
-                    _groupDestination = null;
-                    _groupDestName = '';
-                    _isRoutePreview = false;
-                    _isShared = false;
-                  });
-                  _updateDestinationMarker();
-                  Navigator.pop(ctx);
-                },
-                child: const Text('目的地をリセット', style: TextStyle(color: Colors.redAccent)),
-              ),
-            TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text('キャンセル', style: TextStyle(color: Colors.grey)),
-            ),
-          ],
-        ),
-      ),
-    );
-    // ダイアログ閉了時（barrierDismissible / キャンセルボタン経由含む）に
-    // 進行中のデバウンスを止め、閉じた後の遅延発火を防ぐ。
-    _searchDebounceTimer?.cancel();
   }
 
   Future<void> _shareGroupDestination() async {
