@@ -103,6 +103,10 @@ class _SearchScreenState extends State<SearchScreen> {
             _results = List<Map<String, dynamic>>.from(results);
             _isSearching = false;
           });
+          // 結果到着時にキーボードを閉じて地図/リストの視認性を確保（0件時は再入力余地を残す）
+          if (results.isNotEmpty) {
+            FocusScope.of(context).unfocus();
+          }
           _fitMapToResults();
         } else {
           if (!mounted) return;
@@ -217,21 +221,27 @@ class _SearchScreenState extends State<SearchScreen> {
             ),
         ],
       ),
-      body: Column(
-        children: [
-          _buildSearchField(),
-          if (hasResults)
-            Expanded(
-              child: Column(
-                children: [
-                  Expanded(flex: 3, child: _buildMap()),
-                  Expanded(flex: 2, child: _buildResultsList()),
-                ],
-              ),
-            )
-          else
-            Expanded(child: _buildEmptyStateBody()),
-        ],
+      // body 内の空き領域 / リスト下地タップでキーボードを閉じる。
+      // TextField や ListTile.onTap など子の gesture が消費するタップは素通りするので
+      // 検索ボックスを再タップすればキーボードは復活する。
+      body: GestureDetector(
+        onTap: () => FocusScope.of(context).unfocus(),
+        child: Column(
+          children: [
+            _buildSearchField(),
+            if (hasResults)
+              Expanded(
+                child: Column(
+                  children: [
+                    Expanded(flex: 3, child: _buildMap()),
+                    Expanded(flex: 2, child: _buildResultsList()),
+                  ],
+                ),
+              )
+            else
+              Expanded(child: _buildEmptyStateBody()),
+          ],
+        ),
       ),
     );
   }
@@ -300,6 +310,9 @@ class _SearchScreenState extends State<SearchScreen> {
           WidgetsBinding.instance.addPostFrameCallback((_) => _fitMapToResults());
         }
       },
+      // 地図タップでキーボードを閉じる（GoogleMap は独自にタッチを消費するため
+      // 親 GestureDetector では拾えない）
+      onTap: (_) => FocusScope.of(context).unfocus(),
       markers: markers,
       myLocationEnabled: false,
       myLocationButtonEnabled: false,
