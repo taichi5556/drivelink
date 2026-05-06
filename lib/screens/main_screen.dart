@@ -194,6 +194,8 @@ class _MainScreenState extends State<MainScreen>
   Timer? _demoDeviateTimer;
   bool _demoDeviateActive = false;
   static const Duration _demoDeviateDuration = Duration(seconds: 15);
+  // Phase H-5: DEMO ON 時に位置共有を強制 OFF し、OFF 復帰時に元の値を復元するための退避先
+  bool _preDemoShareLocation = false;
 
   // Phase B-6: 逆走検知 → 自動再検索
   // 速度 >= 18km/h かつ 走行方向と進路方向の角度差 >= 135° が連続3秒で確定 → _fetchRoute(reroute) 発火。
@@ -1682,19 +1684,33 @@ class _MainScreenState extends State<MainScreen>
   }
 
   // Phase H-1: デモモード ON/OFF 切替。位置購読をシミュレータ ⇄ 実 GPS で差し替える。
+  // Phase H-5: ON 時は位置共有を強制 OFF（偽位置流出防止）、OFF 時は元の状態を復元。
   void _toggleDemoMode() {
     _locationSubscription?.cancel();
     _locationSubscription = null;
     if (!_demoMode) {
+      _preDemoShareLocation = _shareLocation;
       _demoSource = DemoLocationSource(_myPosition);
       _demoSource!.start();
-      setState(() => _demoMode = true);
+      setState(() {
+        _demoMode = true;
+        _shareLocation = false;
+      });
+      if (_preDemoShareLocation) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('位置共有をオフにしました（デモ中の偽位置流出防止）'),
+            backgroundColor: Color(0xFF1A3A5C),
+          ),
+        );
+      }
     } else {
       _demoSource?.dispose();
       _demoSource = null;
       setState(() {
         _demoMode = false;
         _demoRunning = false;
+        _shareLocation = _preDemoShareLocation;
       });
     }
     _startLocationStream();
@@ -1758,6 +1774,34 @@ class _MainScreenState extends State<MainScreen>
       _demoSource?.setBearingOffset(0);
       setState(() => _demoReverseActive = false);
     });
+  }
+
+  // Phase H-5: パネル下部のステータス文を生成。
+  // 状態（走行/停車/末尾/未設定） + 進行率 N/M ポイント + 現在オフセット を1ブロックで返す。
+  String _demoStatusText() {
+    final src = _demoSource;
+    final String stateLine;
+    if (src == null || !src.hasRoute) {
+      stateLine = '状態: ルート未設定';
+    } else if (src.isAtEnd) {
+      stateLine = '状態: 末尾到達 ✓';
+    } else if (_demoRunning) {
+      stateLine = '状態: 走行中 ◎';
+    } else {
+      stateLine = '状態: 停車中 ○';
+    }
+    final progress = (src != null && src.hasRoute)
+        ? '進行: ${src.routeIdx + 1}/${src.routeLength}'
+        : '進行: -';
+    final String offsetLine;
+    if (_demoReverseActive) {
+      offsetLine = 'オフセット: 180° (逆走中)';
+    } else if (_demoDeviateActive) {
+      offsetLine = 'オフセット: +90° (離脱中)';
+    } else {
+      offsetLine = 'オフセット: 0°';
+    }
+    return '$stateLine\n$progress\n$offsetLine';
   }
 
   // Phase H-4: B-7 残り距離増加検知をデモ再現。bearing を +90° offset して 15秒維持 → 自動復帰。
@@ -3156,6 +3200,26 @@ class _MainScreenState extends State<MainScreen>
         // 展開：ETA + 目的地名 + アクション 4ボタン
         if (!_isRoutePreview && _routes.isNotEmpty)
           _buildNavigationSheet(),
+        // Phase H-5: DEMO MODE 透かし。マップ中央、低不透明度、IgnorePointer で操作邪魔せず。
+        if (_demoMode)
+          Positioned.fill(
+            child: IgnorePointer(
+              child: Center(
+                child: Padding(
+                  padding: const EdgeInsets.only(bottom: 200),
+                  child: Text(
+                    'DEMO MODE',
+                    style: TextStyle(
+                      color: Colors.red.withValues(alpha: 0.18),
+                      fontSize: 56,
+                      fontWeight: FontWeight.w900,
+                      letterSpacing: 4,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
         // Phase H-1: デモモード切替 FAB（リリース前 revert 予定）。
         // メンバーリスト（top:6）と案内バナー（top:8 height≈80）を避けて top:90 に配置。
         Positioned(
@@ -3294,6 +3358,31 @@ class _MainScreenState extends State<MainScreen>
                       child: Text(
                         _demoDeviateActive ? '離脱中…' : '90°離脱 15秒（B-7）',
                       ),
+                    ),
+                  ),
+                  // Phase H-5: 走行ステータス（状態 / 進行率 / オフセット）
+                  const SizedBox(height: 6),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 6,
+                      vertical: 4,
+                    ),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withValues(alpha: 0.06),
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          _demoStatusText(),
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 10.5,
+                            height: 1.4,
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ],

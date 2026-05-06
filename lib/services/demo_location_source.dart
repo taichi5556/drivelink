@@ -35,6 +35,11 @@ class DemoLocationSource {
   double get currentHeadingDeg => (_bearingDeg + _bearingOffsetDeg) % 360;
   bool get isAutoFollowing => _autoFollow;
   bool get hasRoute => _routePoints.isNotEmpty;
+  // Phase H-5: ステータス表示用
+  int get routeIdx => _routeIdx;
+  int get routeLength => _routePoints.length;
+  bool get isAtEnd =>
+      _routePoints.isNotEmpty && _routeIdx >= _routePoints.length - 1;
 
   void start() {
     _ticker?.cancel();
