@@ -162,6 +162,12 @@ class _MainScreenState extends State<MainScreen>
   DateTime? _pendingSince;
   static const Duration _stepDebounceDuration = Duration(seconds: 3);
 
+  // Phase C-2: 音声案内の tier 管理
+  // step が切り替わるたびに _announcedTiers をリセットし、開始時点で既に通過済みの
+  // tier（500/100/30）は announced 扱いにして読み上げをスキップ（plan A：過去 tier 無音化）。
+  int _lastVoiceStepIdx = -1;
+  Set<int> _announcedTiers = <int>{};
+
   // Phase B-6: 逆走検知 → 自動再検索
   // 速度 >= 18km/h かつ 走行方向と進路方向の角度差 >= 135° が連続3秒で確定 → _fetchRoute(reroute) 発火。
   // 多重発火防止は逸脱判定と同じ _rerouteInFlight / _lastRerouteTime（_rerouteCooldownSecs=20s）を共用。
@@ -1624,6 +1630,7 @@ class _MainScreenState extends State<MainScreen>
       _updatePassedRoute();
       _updateCurrentStep(); // B-2: ステップ判定（投影方式 + 3秒デバウンス）
       _updateReverseDetection(); // B-6: 逆走検知（_currentStepIndex を使うため後）
+      _updateVoiceGuidance(); // C-2: 音声案内（500/100/30m tier で読み上げ）
     }, onError: (e) {
       debugPrint('位置情報ストリームエラー: $e');
     });
@@ -1816,6 +1823,90 @@ class _MainScreenState extends State<MainScreen>
       _currentStepIndex = candidate;
       _pendingStepIndex = null;
       _pendingSince = null;
+    }
+  }
+
+  /// Phase C-2: 音声案内のトリガー。GPS 更新ごとに呼ぶ。
+  /// 現 step の終了点（次の曲がり地点）までの距離を 500m / 100m / 30m の tier 判定で読み上げ。
+  /// step 切替時に _announcedTiers をリセット、開始時点で既に通過済みの tier は announced 扱い（plan A）。
+  /// keep-* / null（直進）maneuver は発話せずスキップ。1 tick で発火する tier は直近 1 つのみ。
+  void _updateVoiceGuidance() {
+    if (_isRoutePreview || _routes.isEmpty) {
+      _lastVoiceStepIdx = -1;
+      _announcedTiers = <int>{};
+      return;
+    }
+    if (_selectedRouteIndex < 0 || _selectedRouteIndex >= _routes.length) return;
+    final steps = _routes[_selectedRouteIndex].steps;
+    if (steps.isEmpty) return;
+
+    final i = _currentStepIndex.clamp(0, steps.length - 1);
+    final isLast = i >= steps.length - 1;
+
+    // step 切替時：tier をリセットし、開始時点で既に切っている tier を「announced 済」に登録
+    if (i != _lastVoiceStepIdx) {
+      _lastVoiceStepIdx = i;
+      _announcedTiers = <int>{};
+      final initDist = _distanceAlongStepToEnd(_myPosition, steps[i]);
+      if (initDist < 500) _announcedTiers.add(500);
+      if (initDist < 100) _announcedTiers.add(100);
+      if (initDist < 30) _announcedTiers.add(30);
+    }
+
+    // 末尾 step は「目的地」固定、それ以外は次 step の maneuver から日本語生成
+    final String? maneuverJa = isLast
+        ? '目的地'
+        : _maneuverToJa(steps[i + 1].maneuver);
+    if (maneuverJa == null) return; // keep-* / null（直進）はスキップ
+
+    final distance = _distanceAlongStepToEnd(_myPosition, steps[i]);
+
+    // 直近 1 tier のみ発火（30 を最優先、GPS ジャンプで複数 tier 跨いでも 1 発話に収束）
+    if (distance < 30 && !_announcedTiers.contains(30)) {
+      _announcedTiers.addAll({30, 100, 500});
+      final text = isLast ? '目的地に到着しました' : maneuverJa;
+      TtsService.instance.speak(text);
+    } else if (distance < 100 && !_announcedTiers.contains(100)) {
+      _announcedTiers.addAll({100, 500});
+      final text = isLast ? 'まもなく目的地' : 'まもなく$maneuverJa';
+      TtsService.instance.speak(text);
+    } else if (distance < 500 && !_announcedTiers.contains(500)) {
+      _announcedTiers.add(500);
+      final text = isLast ? '500m先、目的地です' : '500m先、$maneuverJaです';
+      TtsService.instance.speak(text);
+    }
+  }
+
+  /// Phase C-2: maneuver 文字列を音声案内用の日本語へ変換。null は読み上げ対象外。
+  /// fork-* と ramp-* は同じ「◯方向」で統一（ランプは伝わりにくいため）。
+  String? _maneuverToJa(String? maneuver) {
+    switch (maneuver) {
+      case 'turn-left':
+      case 'turn-sharp-left':
+      case 'turn-slight-left':
+        return '左折';
+      case 'turn-right':
+      case 'turn-sharp-right':
+      case 'turn-slight-right':
+        return '右折';
+      case 'uturn-left':
+      case 'uturn-right':
+        return 'Uターン';
+      case 'fork-left':
+      case 'ramp-left':
+        return '左方向';
+      case 'fork-right':
+      case 'ramp-right':
+        return '右方向';
+      case 'merge':
+        return '合流';
+      case 'roundabout-left':
+      case 'roundabout-right':
+        return 'ロータリー';
+      case 'keep-left':
+      case 'keep-right':
+      default:
+        return null; // 車線維持・直進は読み上げない
     }
   }
 
