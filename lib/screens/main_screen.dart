@@ -2834,13 +2834,14 @@ class _MainScreenState extends State<MainScreen>
           }
         },
         ),
-        // 右下 4 縦列ボタン（上から: + / − / 現在地 / ヘディングアップ）
+        // 左下 4 横列ボタン（左から: + / − / 現在地 / ヘディングアップ）
+        // ナビ中: ETA カード折りたたみ（70px）の真上 bottom: 78（8px breathing）
+        // シート展開時は Stack 後勝ちでシートが上から覆って自然に隠れる（仕様通り）
         // ズームボタン操作で GPS 追従は切れない（programmatic: true により onCameraMoveStarted guard）
-        // ナビ中はシート（折りたたみ ~70px）の上に逃がす（最下段 bottom: 86）
         Positioned(
-          right: 12,
-          bottom: isNav ? 86 : 12,
-          child: Column(
+          left: 12,
+          bottom: isNav ? 78 : 12,
+          child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
               // ＋ ズームイン
@@ -2850,7 +2851,7 @@ class _MainScreenState extends State<MainScreen>
                 bgColor: const Color(0xFF1A3A5C).withValues(alpha: 0.9),
                 iconColor: Colors.white,
               ),
-              const SizedBox(height: 8),
+              const SizedBox(width: 8),
               // − ズームアウト
               _buildSquareMapButton(
                 icon: Icons.remove,
@@ -2858,7 +2859,7 @@ class _MainScreenState extends State<MainScreen>
                 bgColor: const Color(0xFF1A3A5C).withValues(alpha: 0.9),
                 iconColor: Colors.white,
               ),
-              const SizedBox(height: 8),
+              const SizedBox(width: 8),
               // 現在地（タップ: センタリング + zoom17 / ダブルタップ: 全メンバー収まるズーム）
               GestureDetector(
                 onTap: _handleRecenterTap,
@@ -2878,7 +2879,7 @@ class _MainScreenState extends State<MainScreen>
                   ),
                 ),
               ),
-              const SizedBox(height: 8),
+              const SizedBox(width: 8),
               // ヘディングアップ ON/OFF
               GestureDetector(
                 onTap: () {
