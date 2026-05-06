@@ -3502,7 +3502,7 @@ class _MainScreenState extends State<MainScreen>
     ];
   }
 
-  // 2段目アクションボタン4つ（2D/3D + 準備中×3）
+  // 2段目アクションボタン4つ（2D/3D + 経由地 + 準備中×2）
   // 1段目と同レイアウト（4ボタン横並び等幅）。準備中枠は onTap=null + グレーで非活性表現。
   List<Widget> _buildActionButtonItems2(double btnWidth) {
     return [
@@ -3513,7 +3513,15 @@ class _MainScreenState extends State<MainScreen>
         onTap: _toggleMapTiltMode,
         width: btnWidth,
       ),
-      for (int k = 0; k < 3; k++)
+      // M-1e: 経由地追加ボタン。SearchScreen 起動 → 検索結果から「経由地として追加」を選択
+      _buildActionBtn(
+        icon: Icons.add_location_alt_outlined,
+        label: '経由地',
+        color: const Color(0xFFFF8A50),  // 経由地マーカー（hueOrange）と色統一
+        onTap: _setPersonalDestination,
+        width: btnWidth,
+      ),
+      for (int k = 0; k < 2; k++)
         _buildActionBtn(
           icon: Icons.more_horiz,
           label: '準備中',
@@ -3524,9 +3532,10 @@ class _MainScreenState extends State<MainScreen>
     ];
   }
 
-  // 縦画面 bottom 用：横並び 4ボタン（ナビ中のみ 2段目 [2D/3D + 準備中×3] を追加表示）
+  // 縦画面 bottom 用：横並び 4ボタン（ルート有り時のみ 2段目 [2D/3D + 経由地 + 準備中×2]
+  // を追加表示。プレビュー中も含む = 経由地追加をプレビュー段階でも可能に）
   Widget _buildActionButtons() {
-    final isNavigating = !_isRoutePreview && _routes.isNotEmpty;
+    final hasRoute = _routes.isNotEmpty;
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
       child: LayoutBuilder(
@@ -3550,7 +3559,7 @@ class _MainScreenState extends State<MainScreen>
             mainAxisSize: MainAxisSize.min,
             children: [
               rowOf(items),
-              if (isNavigating) ...[
+              if (hasRoute) ...[
                 const SizedBox(height: spacing),
                 rowOf(_buildActionButtonItems2(btnWidth)),
               ],
@@ -3561,13 +3570,13 @@ class _MainScreenState extends State<MainScreen>
     );
   }
 
-  // 横画面 左帯用：縦並び 4ボタン（ナビ中のみ 2段目を縦に追加で計8ボタン）
+  // 横画面 左帯用：縦並び 4ボタン（ルート有り時のみ 2段目を縦に追加で計8ボタン）
   Widget _buildActionButtonsVertical() {
-    final isNavigating = !_isRoutePreview && _routes.isNotEmpty;
+    final hasRoute = _routes.isNotEmpty;
     const double spacing = 8.0;
     final items = [
       ..._buildActionButtonItems(60.0),
-      if (isNavigating) ..._buildActionButtonItems2(60.0),
+      if (hasRoute) ..._buildActionButtonItems2(60.0),
     ];
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
