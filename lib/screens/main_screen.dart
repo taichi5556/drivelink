@@ -168,6 +168,14 @@ class _MainScreenState extends State<MainScreen>
   int _lastVoiceStepIdx = -1;
   Set<int> _announcedTiers = <int>{};
 
+  // Phase B-7: 残り距離増加検知（90° ズレで B-6 がヒットしないケースを補完）
+  // GPS tick ごとに _remainingDistanceMeters を記録、10秒前比で +100m 以上増 + 速度 5km/h 以上で再検索。
+  // Cooldown は B-6 と共用（_lastRerouteTime / _rerouteCooldownSecs / _rerouteInFlight）。
+  final List<_DistSample> _distSamples = [];
+  static const Duration _distHistoryDuration = Duration(seconds: 10);
+  static const double _distIncreaseThresholdMeters = 100.0;
+  static const double _distIncreaseSpeedMps = 5.0 / 3.6; // 5 km/h
+
   // Phase B-6: 逆走検知 → 自動再検索
   // 速度 >= 18km/h かつ 走行方向と進路方向の角度差 >= 135° が連続3秒で確定 → _fetchRoute(reroute) 発火。
   // 多重発火防止は逸脱判定と同じ _rerouteInFlight / _lastRerouteTime（_rerouteCooldownSecs=20s）を共用。
@@ -1634,6 +1642,7 @@ class _MainScreenState extends State<MainScreen>
       _updateCurrentStep(); // B-2: ステップ判定（投影方式 + 3秒デバウンス）
       _updateReverseDetection(); // B-6: 逆走検知（_currentStepIndex を使うため後）
       _updateVoiceGuidance(); // C-2: 音声案内（500/100/30m tier で読み上げ）
+      _updateRemainingDistanceCheck(); // B-7: 残り距離増加検知（90° ズレ補完）
     }, onError: (e) {
       debugPrint('位置情報ストリームエラー: $e');
     });
@@ -1878,6 +1887,53 @@ class _MainScreenState extends State<MainScreen>
       final text = isLast ? '500m先、目的地です' : '500m先、$maneuverJaです';
       TtsService.instance.speak(text);
     }
+  }
+
+  /// Phase B-7: 残り距離が増加していないか監視 → 自動再検索。GPS 更新ごとに呼ぶ。
+  /// 90° ズレ（B-6 の 135° しきい値で検知できない）でルートから離れて残り距離が増えていく
+  /// ケースを 10秒スパンの増減で捕捉。最古サンプル 9秒以上経過時、現在 - 最古 > 100m
+  /// かつ速度 > 5km/h で発火。Cooldown は B-6 と共用。
+  void _updateRemainingDistanceCheck() {
+    if (_isRoutePreview || _routes.isEmpty || _groupDestination == null) {
+      _distSamples.clear();
+      return;
+    }
+    if (_rerouteInFlight) {
+      _distSamples.clear();
+      return;
+    }
+    final now = DateTime.now();
+    if (_lastRerouteTime != null &&
+        now.difference(_lastRerouteTime!).inSeconds < _rerouteCooldownSecs) {
+      _distSamples.clear();
+      return;
+    }
+    final dist = _remainingDistanceMeters();
+    if (dist <= 0) return;
+
+    // 10秒以上古いサンプルを削除
+    _distSamples.removeWhere(
+      (s) => now.difference(s.t) > _distHistoryDuration,
+    );
+
+    // 最古サンプルが 9秒以上経過していれば判定（バッファ未充足は判定スキップ）
+    if (_distSamples.isNotEmpty) {
+      final oldest = _distSamples.first;
+      if (now.difference(oldest.t).inSeconds >= 9) {
+        final increase = dist - oldest.dist;
+        final speedOk = _currentSpeed > _distIncreaseSpeedMps;
+        if (increase > _distIncreaseThresholdMeters && speedOk) {
+          _appendDebugLog(
+            '[B-7] 残り距離増加 → 再検索 +${increase.toStringAsFixed(0)}m 速度=${(_currentSpeed * 3.6).toStringAsFixed(1)}km/h',
+          );
+          _distSamples.clear();
+          _fetchRoute(_groupDestination!, isRerouting: true);
+          return;
+        }
+      }
+    }
+
+    _distSamples.add(_DistSample(now, dist));
   }
 
   /// Phase C-2: maneuver 文字列を音声案内用の日本語へ変換。null は読み上げ対象外。
@@ -3816,6 +3872,13 @@ class _MainScreenState extends State<MainScreen>
       ),
     );
   }
+}
+
+// Phase B-7: 残り距離サンプル（時刻 + その時点での残り距離 m）。10秒履歴で増加検知に使用。
+class _DistSample {
+  final DateTime t;
+  final double dist;
+  const _DistSample(this.t, this.dist);
 }
 
 // Directions API から取得した 1 本のルート情報。複数ルート (alternatives=true) の保持に使用。
