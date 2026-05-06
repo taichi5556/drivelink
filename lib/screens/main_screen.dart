@@ -1428,6 +1428,7 @@ class _MainScreenState extends State<MainScreen>
         hasGpsFix: _hasGpsFix,
         history: history,
         hasActiveDestination: _groupDestination != null,
+        hasActiveRoute: _routes.isNotEmpty,
         placesApiKey: 'AIzaSyChuUZypiVhojgCO6ZgZML-ZW3eYLtti5c',
       )),
     );

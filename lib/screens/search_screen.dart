@@ -31,6 +31,8 @@ class SearchScreen extends StatefulWidget {
   final bool hasGpsFix;
   final List<Map<String, dynamic>> history;
   final bool hasActiveDestination;
+  // M-1c: 経由地ボタンの活性条件（既存ルートあり）
+  final bool hasActiveRoute;
   final String placesApiKey;
 
   const SearchScreen({
@@ -39,6 +41,7 @@ class SearchScreen extends StatefulWidget {
     required this.hasGpsFix,
     required this.history,
     required this.hasActiveDestination,
+    required this.hasActiveRoute,
     required this.placesApiKey,
   });
 
@@ -217,6 +220,131 @@ class _SearchScreenState extends State<SearchScreen> {
         curve: Curves.easeOut,
       );
     }
+  }
+
+  /// M-1c: 詳細ダイアログ。「目的地として設定」「経由地として追加」の2択。
+  /// 経由地ボタンは hasActiveRoute=true 時のみ活性（M-1c は SnackBar 仮、M-1d で実装）。
+  Future<void> _showDetailDialog(int idx) async {
+    final r = _results[idx];
+    final name = r['name'] as String;
+    final address = r['address'] as String;
+    final lat = r['lat'] as double;
+    final lng = r['lng'] as double;
+    final dist = _metersTo(widget.currentPosition, LatLng(lat, lng));
+
+    await showDialog<void>(
+      context: context,
+      builder: (dialogCtx) => AlertDialog(
+        backgroundColor: const Color(0xFF0D1B2A),
+        titlePadding: const EdgeInsets.fromLTRB(20, 12, 8, 0),
+        contentPadding: const EdgeInsets.fromLTRB(20, 8, 20, 16),
+        title: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(
+              child: Text(
+                name,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 16,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+            IconButton(
+              icon: const Icon(Icons.close, color: Colors.grey, size: 22),
+              onPressed: () => Navigator.pop(dialogCtx),
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+            ),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(children: [
+              const Icon(Icons.place, color: Color(0xFF00D4FF), size: 14),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  address,
+                  style: const TextStyle(color: Color(0xFFAAB8C8), fontSize: 12),
+                ),
+              ),
+            ]),
+            const SizedBox(height: 6),
+            Row(children: [
+              const Icon(Icons.straighten, color: Color(0xFF6680AA), size: 14),
+              const SizedBox(width: 6),
+              Text(
+                '距離 ${_formatDistance(dist)}',
+                style: const TextStyle(color: Color(0xFF6680AA), fontSize: 12),
+              ),
+            ]),
+            const SizedBox(height: 16),
+            // 目的地として設定（常時活性）
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                icon: const Icon(Icons.flag, size: 18),
+                label: const Text('目的地として設定'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF00D4FF),
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                ),
+                onPressed: () {
+                  Navigator.pop(dialogCtx);
+                  Navigator.pop(
+                    context,
+                    SearchResultAction(
+                      type: 'destination',
+                      name: name,
+                      lat: lat,
+                      lng: lng,
+                    ),
+                  );
+                },
+              ),
+            ),
+            const SizedBox(height: 8),
+            // 経由地として追加（M-1c: hasActiveRoute=true 時のみ活性、押下で SnackBar 仮）
+            SizedBox(
+              width: double.infinity,
+              child: Tooltip(
+                message: widget.hasActiveRoute ? '' : 'ルート設定後に使用可能',
+                child: ElevatedButton.icon(
+                  icon: const Icon(Icons.add_location_alt_outlined, size: 18),
+                  label: const Text('経由地として追加'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: widget.hasActiveRoute
+                        ? const Color(0xFFFF8A50)
+                        : Colors.grey.shade700,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                  ),
+                  onPressed: widget.hasActiveRoute
+                      ? () {
+                          Navigator.pop(dialogCtx);
+                          if (mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                content: Text('経由地機能は準備中です'),
+                                backgroundColor: Color(0xFF1A3A5C),
+                                duration: Duration(seconds: 2),
+                              ),
+                            );
+                          }
+                        }
+                      : null,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   void _selectDestination(String name, double lat, double lng) {
@@ -408,8 +536,11 @@ class _SearchScreenState extends State<SearchScreen> {
                 style:
                     const TextStyle(color: Color(0xFF6680AA), fontSize: 11),
               ),
-              // M-1b: 確定はせず強調のみ（M-1c で詳細ダイアログ → 確定へ）
-              onTap: () => _selectFromList(i),
+              // M-1c: 強調しつつ詳細ダイアログを表示。ダイアログ閉じても選択状態は維持
+              onTap: () {
+                _selectFromList(i);
+                _showDetailDialog(i);
+              },
             ),
           );
         },
