@@ -15,8 +15,6 @@ import 'package:google_mobile_ads/google_mobile_ads.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../services/room_history.dart';
 import '../services/tts_service.dart';
-// Phase H-1: デモモード（リリース前 revert 予定）
-import '../services/demo_location_source.dart';
 import 'login_screen.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:app_links/app_links.dart';
@@ -178,24 +176,6 @@ class _MainScreenState extends State<MainScreen>
   static const double _distIncreaseThresholdMeters = 100.0;
   static const double _distIncreaseSpeedMps = 5.0 / 3.6; // 5 km/h
 
-  // Phase H-1: デモモード（リリース前 revert 予定）
-  // ON にすると Geolocator の代わりに DemoLocationSource からの合成 Position を購読。
-  // _handlePositionUpdate 以降のロジックは無改修で動作する。
-  bool _demoMode = false;
-  DemoLocationSource? _demoSource;
-  // Phase H-2: デモ走行制御
-  bool _demoRunning = false;
-  double _demoSpeedKmh = 60.0;
-  // Phase H-3: 逆走シミュレーション（B-6 検証用）
-  Timer? _demoReverseTimer;
-  bool _demoReverseActive = false;
-  static const Duration _demoReverseDuration = Duration(seconds: 7);
-  // Phase H-4: 90° 離脱シミュレーション（B-7 検証用）
-  Timer? _demoDeviateTimer;
-  bool _demoDeviateActive = false;
-  static const Duration _demoDeviateDuration = Duration(seconds: 15);
-  // Phase H-5: DEMO ON 時に位置共有を強制 OFF し、OFF 復帰時に元の値を復元するための退避先
-  bool _preDemoShareLocation = false;
 
   // Phase B-6: 逆走検知 → 自動再検索
   // 速度 >= 18km/h かつ 走行方向と進路方向の角度差 >= 135° が連続3秒で確定 → _fetchRoute(reroute) 発火。
@@ -1226,8 +1206,6 @@ class _MainScreenState extends State<MainScreen>
                 _isFollowingMember = false;
               }
             });
-            // Phase H-2: 新ルート構築直後に Demo にも反映（B-6/B-7 reroute 後も自動追従継続）
-            _syncDemoRoute();
             debugPrint('[Phase5] ルート構築: ${newRoutes.length}本 (選択中=$_selectedRouteIndex, 通過済み着色=有効)');
             // [DEBUG-TEMP] 再検索完了ログ
             if (isRerouting) {
@@ -1616,21 +1594,12 @@ class _MainScreenState extends State<MainScreen>
   }
 
   void _startLocationStream() {
-    // Phase H-1: デモモード ON なら DemoLocationSource からの合成 Stream を購読、
-    // OFF（通常）なら従来通り Geolocator から購読。ハンドラ本体（_handlePositionUpdate）は共通。
-    if (_demoMode && _demoSource != null) {
-      _locationSubscription = _demoSource!.stream.listen(
-        _handlePositionUpdate,
-        onError: (e) => debugPrint('デモ位置情報ストリームエラー: $e'),
-      );
-    } else {
-      _locationSubscription = Geolocator.getPositionStream(
-        locationSettings: _buildLocationSettings(),
-      ).listen(
-        _handlePositionUpdate,
-        onError: (e) => debugPrint('位置情報ストリームエラー: $e'),
-      );
-    }
+    _locationSubscription = Geolocator.getPositionStream(
+      locationSettings: _buildLocationSettings(),
+    ).listen(
+      _handlePositionUpdate,
+      onError: (e) => debugPrint('位置情報ストリームエラー: $e'),
+    );
   }
 
   Future<void> _handlePositionUpdate(Position pos) async {
@@ -1683,142 +1652,6 @@ class _MainScreenState extends State<MainScreen>
     _updateRemainingDistanceCheck(); // B-7: 残り距離増加検知（90° ズレ補完）
   }
 
-  // Phase H-1: デモモード ON/OFF 切替。位置購読をシミュレータ ⇄ 実 GPS で差し替える。
-  // Phase H-5: ON 時は位置共有を強制 OFF（偽位置流出防止）、OFF 時は元の状態を復元。
-  void _toggleDemoMode() {
-    _locationSubscription?.cancel();
-    _locationSubscription = null;
-    if (!_demoMode) {
-      _preDemoShareLocation = _shareLocation;
-      _demoSource = DemoLocationSource(_myPosition);
-      _demoSource!.start();
-      setState(() {
-        _demoMode = true;
-        _shareLocation = false;
-      });
-      if (_preDemoShareLocation) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('位置共有をオフにしました（デモ中の偽位置流出防止）'),
-            backgroundColor: Color(0xFF1A3A5C),
-          ),
-        );
-      }
-    } else {
-      _demoSource?.dispose();
-      _demoSource = null;
-      setState(() {
-        _demoMode = false;
-        _demoRunning = false;
-        _shareLocation = _preDemoShareLocation;
-      });
-    }
-    _startLocationStream();
-  }
-
-  // Phase H-2: 現在の選択ルートの polyline を DemoLocationSource に流し込む。
-  // 走行開始時 / reroute 完了時に呼ぶことで、デモ走行が常に最新ルートに追従する。
-  void _syncDemoRoute() {
-    if (_demoSource == null) return;
-    if (_routes.isEmpty || _selectedRouteIndex < 0 ||
-        _selectedRouteIndex >= _routes.length) {
-      _demoSource!.clearRoute();
-      return;
-    }
-    _demoSource!.setRoute(_routes[_selectedRouteIndex].points);
-  }
-
-  // Phase H-2: 走行開始/停止。ルート未設定なら snackbar で誘導。
-  void _toggleDemoRunning() {
-    if (_demoSource == null) return;
-    if (!_demoRunning) {
-      if (_routes.isEmpty) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('先にルートを設定してください'),
-            backgroundColor: Color(0xFF1A3A5C),
-          ),
-        );
-        return;
-      }
-      _syncDemoRoute();
-      _demoSource!.setSpeedKmh(_demoSpeedKmh);
-      _demoSource!.setAutoFollow(true);
-      setState(() => _demoRunning = true);
-    } else {
-      _demoSource!.setAutoFollow(false);
-      _demoSource!.setSpeedKmh(0);
-      setState(() => _demoRunning = false);
-    }
-  }
-
-  // Phase H-2: 速度スライダー変更時。走行中なら即座に Demo に反映。
-  void _onDemoSpeedChanged(double kmh) {
-    setState(() => _demoSpeedKmh = kmh);
-    if (_demoRunning && _demoSource != null) {
-      _demoSource!.setSpeedKmh(kmh);
-    }
-  }
-
-  // Phase H-3: B-6 逆走検知をデモ再現。bearing を 180° 反転して 7秒維持 → 自動復帰。
-  // B-6 発火条件は速度 ≥ 18km/h かつ 角度差 ≥ 135° が 3秒連続なので、
-  // 走行速度を 60km/h 等にしておけば 3秒経過時点で発火 → 残り 4秒で reroute 観測。
-  void _triggerDemoReverse() {
-    if (_demoSource == null || !_demoRunning) return;
-    if (_demoReverseActive || _demoDeviateActive) return; // H-4 と相互排他
-    _demoReverseTimer?.cancel();
-    _demoSource!.setBearingOffset(180);
-    setState(() => _demoReverseActive = true);
-    _demoReverseTimer = Timer(_demoReverseDuration, () {
-      if (!mounted) return;
-      _demoSource?.setBearingOffset(0);
-      setState(() => _demoReverseActive = false);
-    });
-  }
-
-  // Phase H-5: パネル下部のステータス文を生成。
-  // 状態（走行/停車/末尾/未設定） + 進行率 N/M ポイント + 現在オフセット を1ブロックで返す。
-  String _demoStatusText() {
-    final src = _demoSource;
-    final String stateLine;
-    if (src == null || !src.hasRoute) {
-      stateLine = '状態: ルート未設定';
-    } else if (src.isAtEnd) {
-      stateLine = '状態: 末尾到達 ✓';
-    } else if (_demoRunning) {
-      stateLine = '状態: 走行中 ◎';
-    } else {
-      stateLine = '状態: 停車中 ○';
-    }
-    final progress = (src != null && src.hasRoute)
-        ? '進行: ${src.routeIdx + 1}/${src.routeLength}'
-        : '進行: -';
-    final String offsetLine;
-    if (_demoReverseActive) {
-      offsetLine = 'オフセット: 180° (逆走中)';
-    } else if (_demoDeviateActive) {
-      offsetLine = 'オフセット: +90° (離脱中)';
-    } else {
-      offsetLine = 'オフセット: 0°';
-    }
-    return '$stateLine\n$progress\n$offsetLine';
-  }
-
-  // Phase H-4: B-7 残り距離増加検知をデモ再現。bearing を +90° offset して 15秒維持 → 自動復帰。
-  // B-7 発火条件は最古サンプル 9秒以上経過 + 増加量 > 100m + 速度 > 5km/h。
-  // 60km/h で 15秒走行すれば 250m 移動するので、ルート直交方向に外れれば確実に 100m 増加を観測。
-  void _triggerDemoDeviate() {
-    if (_demoSource == null || !_demoRunning) return;
-    if (_demoDeviateActive || _demoReverseActive) return; // H-3 と相互排他
-    _demoDeviateTimer?.cancel();
-    _demoSource!.setBearingOffset(90);
-    setState(() => _demoDeviateActive = true);
-    _demoDeviateTimer = Timer(_demoDeviateDuration, () {
-      if (!mounted) return;
-      _demoSource?.setBearingOffset(0);
-      setState(() => _demoDeviateActive = false);
-    });
-  }
 
   Future<void> _updateLocation() async {
     if (_updateLocationInProgress) return;
@@ -2634,10 +2467,6 @@ class _MainScreenState extends State<MainScreen>
     for (final t in _notificationHideTimers.values) { t.cancel(); }
     for (final t in _notificationRetryTimers.values) { t.cancel(); }
     _appLinkSubscription?.cancel();
-    // Phase H: デモモード関連タイマー / Stream
-    _demoReverseTimer?.cancel();
-    _demoDeviateTimer?.cancel();
-    _demoSource?.dispose();
     WidgetsBinding.instance.removeObserver(this);
     _markerAnimController?.removeListener(_onMarkerAnimTick);
     _markerAnimController?.dispose();
@@ -3200,195 +3029,6 @@ class _MainScreenState extends State<MainScreen>
         // 展開：ETA + 目的地名 + アクション 4ボタン
         if (!_isRoutePreview && _routes.isNotEmpty)
           _buildNavigationSheet(),
-        // Phase H-5: DEMO MODE 透かし。マップ中央、低不透明度、IgnorePointer で操作邪魔せず。
-        if (_demoMode)
-          Positioned.fill(
-            child: IgnorePointer(
-              child: Center(
-                child: Padding(
-                  padding: const EdgeInsets.only(bottom: 200),
-                  child: Text(
-                    'DEMO MODE',
-                    style: TextStyle(
-                      color: Colors.red.withValues(alpha: 0.18),
-                      fontSize: 56,
-                      fontWeight: FontWeight.w900,
-                      letterSpacing: 4,
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          ),
-        // Phase H-1: デモモード切替 FAB（リリース前 revert 予定）。
-        // メンバーリスト（top:6）と案内バナー（top:8 height≈80）を避けて top:90 に配置。
-        Positioned(
-          right: 12,
-          top: 90,
-          child: GestureDetector(
-            onTap: _toggleDemoMode,
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-              decoration: BoxDecoration(
-                color: _demoMode ? Colors.redAccent : Colors.grey.shade700,
-                borderRadius: BorderRadius.circular(16),
-                boxShadow: const [
-                  BoxShadow(color: Colors.black38, blurRadius: 4),
-                ],
-              ),
-              child: Text(
-                _demoMode ? 'DEMO ON' : 'DEMO',
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 11,
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: 0.5,
-                ),
-              ),
-            ),
-          ),
-        ),
-        // Phase H-2: デモ走行コントロールパネル（DEMO ON 時のみ表示、リリース前 revert 予定）
-        if (_demoMode)
-          Positioned(
-            right: 12,
-            top: 130,
-            width: 200,
-            child: Container(
-              padding: const EdgeInsets.all(10),
-              decoration: BoxDecoration(
-                color: Colors.black.withValues(alpha: 0.75),
-                borderRadius: BorderRadius.circular(10),
-              ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    '速度: ${_demoSpeedKmh.toStringAsFixed(0)} km/h',
-                    style: const TextStyle(color: Colors.white, fontSize: 12),
-                  ),
-                  SliderTheme(
-                    data: SliderTheme.of(context).copyWith(
-                      trackHeight: 2,
-                      thumbShape: const RoundSliderThumbShape(
-                        enabledThumbRadius: 7,
-                      ),
-                    ),
-                    child: Slider(
-                      min: 5,
-                      max: 100,
-                      divisions: 19,
-                      value: _demoSpeedKmh,
-                      onChanged: _onDemoSpeedChanged,
-                    ),
-                  ),
-                  SizedBox(
-                    width: double.infinity,
-                    height: 32,
-                    child: ElevatedButton(
-                      onPressed: _toggleDemoRunning,
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: _demoRunning
-                            ? Colors.orangeAccent
-                            : Colors.greenAccent.shade400,
-                        foregroundColor: Colors.black,
-                        padding: EdgeInsets.zero,
-                        textStyle: const TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                      child: Text(_demoRunning ? '停止' : '走行開始'),
-                    ),
-                  ),
-                  const SizedBox(height: 6),
-                  // Phase H-3: B-6 逆走検知の検証ボタン（走行中のみ押下可、H-4 と相互排他）
-                  SizedBox(
-                    width: double.infinity,
-                    height: 30,
-                    child: ElevatedButton(
-                      onPressed: (_demoRunning &&
-                              !_demoReverseActive &&
-                              !_demoDeviateActive)
-                          ? _triggerDemoReverse
-                          : null,
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: _demoReverseActive
-                            ? Colors.red.shade300
-                            : Colors.red.shade400,
-                        foregroundColor: Colors.white,
-                        disabledBackgroundColor: Colors.grey.shade800,
-                        disabledForegroundColor: Colors.grey.shade500,
-                        padding: EdgeInsets.zero,
-                        textStyle: const TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                      child: Text(
-                        _demoReverseActive ? '逆走中…' : '逆走 7秒（B-6）',
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  // Phase H-4: B-7 90° 離脱の検証ボタン（走行中のみ押下可、H-3 と相互排他）
-                  SizedBox(
-                    width: double.infinity,
-                    height: 30,
-                    child: ElevatedButton(
-                      onPressed: (_demoRunning &&
-                              !_demoDeviateActive &&
-                              !_demoReverseActive)
-                          ? _triggerDemoDeviate
-                          : null,
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: _demoDeviateActive
-                            ? Colors.deepOrange.shade300
-                            : Colors.deepOrange.shade400,
-                        foregroundColor: Colors.white,
-                        disabledBackgroundColor: Colors.grey.shade800,
-                        disabledForegroundColor: Colors.grey.shade500,
-                        padding: EdgeInsets.zero,
-                        textStyle: const TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                      child: Text(
-                        _demoDeviateActive ? '離脱中…' : '90°離脱 15秒（B-7）',
-                      ),
-                    ),
-                  ),
-                  // Phase H-5: 走行ステータス（状態 / 進行率 / オフセット）
-                  const SizedBox(height: 6),
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 6,
-                      vertical: 4,
-                    ),
-                    decoration: BoxDecoration(
-                      color: Colors.white.withValues(alpha: 0.06),
-                      borderRadius: BorderRadius.circular(6),
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          _demoStatusText(),
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 10.5,
-                            height: 1.4,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
       ],
     );
   }
