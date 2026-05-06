@@ -610,6 +610,9 @@ class _MainScreenState extends State<MainScreen>
           _routePreference = 'highway';
           _isRoutePreview = false;
           _isShared = false;
+          _waypoints.clear();
+          _waypointNames.clear();
+          _waypointSaidNear.clear();
         });
         _updateDestinationMarker();
         return;
@@ -628,6 +631,36 @@ class _MainScreenState extends State<MainScreen>
       if (lat == null || lng == null) return;
       final newDest = LatLng(lat, lng);
       if (senderUid != widget.userId) {
+        // M-1 経由地共有: waypoints を List/Map 両形式でパース
+        // （Firebase Realtime DB は List を numeric-keyed Map として保存することがある）
+        final newWaypoints = <LatLng>[];
+        final newWaypointNames = <String>[];
+        void parseWp(dynamic wp) {
+          if (wp is! Map) return;
+          final wlat = (wp['lat'] as num?)?.toDouble();
+          final wlng = (wp['lng'] as num?)?.toDouble();
+          final wname = wp['name'] as String? ?? '経由地';
+          if (wlat != null && wlng != null) {
+            newWaypoints.add(LatLng(wlat, wlng));
+            newWaypointNames.add(wname);
+          }
+        }
+        final wpsRaw = data['waypoints'];
+        if (wpsRaw is List) {
+          for (final wp in wpsRaw) {
+            parseWp(wp);
+          }
+        } else if (wpsRaw is Map) {
+          final entries = wpsRaw.entries.toList()
+            ..sort((a, b) {
+              final ai = int.tryParse(a.key.toString()) ?? 0;
+              final bi = int.tryParse(b.key.toString()) ?? 0;
+              return ai.compareTo(bi);
+            });
+          for (final e in entries) {
+            parseWp(e.value);
+          }
+        }
         // 他メンバーが共有した目的地を受信したらプレビューを強制解除し、
         // Firebase 同期済み状態に遷移（_isShared=true）
         setState(() {
@@ -635,6 +668,15 @@ class _MainScreenState extends State<MainScreen>
           _groupDestName = name;
           _isRoutePreview = false;
           _isShared = true;
+          _waypoints
+            ..clear()
+            ..addAll(newWaypoints);
+          _waypointNames
+            ..clear()
+            ..addAll(newWaypointNames);
+          _waypointSaidNear
+            ..clear()
+            ..addAll(List.filled(newWaypoints.length, false));
         });
         _updateDestinationMarker();
         _saveDestHistory(name, lat, lng);
@@ -1660,6 +1702,12 @@ class _MainScreenState extends State<MainScreen>
       'senderNick': widget.nickname,
       'shared_at': DateTime.now().millisecondsSinceEpoch,
       'routePreference': _routePreference,
+      // M-1 経由地共有: 各 waypoint を {lat, lng, name} で書込。経由地ゼロ時は空配列
+      'waypoints': List.generate(_waypoints.length, (i) => {
+        'lat': _waypoints[i].latitude,
+        'lng': _waypoints[i].longitude,
+        'name': _waypointNames[i],
+      }),
     });
     if (mounted) {
       setState(() => _isShared = true);
