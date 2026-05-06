@@ -3613,9 +3613,11 @@ class _MainScreenState extends State<MainScreen>
     return LayoutBuilder(
       builder: (context, constraints) {
         final parentH = constraints.maxHeight;
-        // 折りたたみ ~70px（ハンドル + ETA行 + 余白）/ 展開 ~180px（ハンドル + ETA + 4ボタン + 余白）
+        // 折りたたみ ~70px（ハンドル + ETA行 + 余白）/ 展開 ~200px（ハンドル + ETA + 音声トグル + 4ボタン + 余白）
+        // 200px はコンテンツ実測 191px に対して 9px の余裕。下記 NeverScrollableScrollPhysics と
+        // 併せてシート展開時にコンテンツが確実に収まるよう保証。
         final minSize = (70.0 / parentH).clamp(0.06, 0.4);
-        final maxSize = (180.0 / parentH).clamp(0.12, 0.6);
+        final maxSize = (200.0 / parentH).clamp(0.12, 0.6);
         // _expandSheetTemporarily 用にキャッシュ
         _sheetMinSize = minSize;
         _sheetMaxSize = maxSize;
@@ -3746,6 +3748,10 @@ class _MainScreenState extends State<MainScreen>
           ),
           child: ListView(
             controller: scrollController,
+            // 内部スクロールを無効化することで、全ての縦ドラッグが DraggableScrollableSheet 本体の
+            // ドラッグへ素通りする。ScrollController は attach 維持（bridge 機構の要件）。
+            // これでハンドル外の任意位置からも上下スワイプで展開/折りたたみが効く。
+            physics: const NeverScrollableScrollPhysics(),
             padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
             children: [
               // ハンドル（タップで展開／折りたたみトグル。誤作動防止のためシート本体は反応させない）
