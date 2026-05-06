@@ -1183,7 +1183,7 @@ class _MainScreenState extends State<MainScreen>
         history: const [],
         hasActiveDestination: false,
         hasActiveRoute: true,
-        hasWaypoints: _waypoints.isNotEmpty,
+        waypointCount: _waypoints.length,
         isWaypointMode: true,
         placesApiKey: 'AIzaSyChuUZypiVhojgCO6ZgZML-ZW3eYLtti5c',
       )),

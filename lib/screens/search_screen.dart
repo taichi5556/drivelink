@@ -39,8 +39,8 @@ class SearchScreen extends StatefulWidget {
   // - 詳細ダイアログは「経由地として追加」のみ表示（常時活性）
   // - 右上ゴミ箱は hasWaypoints 時のみ表示、type='clear_waypoints' を返す
   final bool isWaypointMode;
-  // 経由地モードでゴミ箱を出すかの判定（経由地が1個以上ある時）
-  final bool hasWaypoints;
+  // 経由地モードでゴミ箱表示判定 + 確認ダイアログの件数表示用
+  final int waypointCount;
 
   const SearchScreen({
     super.key,
@@ -51,7 +51,7 @@ class SearchScreen extends StatefulWidget {
     required this.hasActiveRoute,
     required this.placesApiKey,
     this.isWaypointMode = false,
-    this.hasWaypoints = false,
+    this.waypointCount = 0,
   });
 
   @override
@@ -208,6 +208,39 @@ class _SearchScreenState extends State<SearchScreen> {
   String _formatDistance(double meters) {
     if (meters < 1000) return '${meters.toStringAsFixed(0)}m';
     return '${(meters / 1000).toStringAsFixed(1)}km';
+  }
+
+  /// 経由地全クリア確認ダイアログ。OK の時のみ type='clear_waypoints' で pop。
+  Future<void> _confirmAndClearWaypoints() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF0D1B2A),
+        title: const Text(
+          '経由地をクリアしますか？',
+          style: TextStyle(color: Colors.white, fontSize: 16),
+        ),
+        content: Text(
+          '${widget.waypointCount}個の経由地が削除されます',
+          style: const TextStyle(color: Color(0xFFAAB8C8), fontSize: 14),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('キャンセル', style: TextStyle(color: Colors.grey)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('クリア',
+                style: TextStyle(color: Colors.redAccent, fontWeight: FontWeight.w600)),
+          ),
+        ],
+      ),
+    );
+    if (!mounted) return;
+    if (confirmed == true) {
+      Navigator.pop(context, const SearchResultAction(type: 'clear_waypoints'));
+    }
   }
 
   /// M-1b: リスト項目タップ → 該当ピン強調 + 地図カメラ移動 + InfoWindow 表示
@@ -384,14 +417,11 @@ class _SearchScreenState extends State<SearchScreen> {
           style: const TextStyle(fontSize: 16),
         ),
         actions: [
-          if (widget.isWaypointMode && widget.hasWaypoints)
+          if (widget.isWaypointMode && widget.waypointCount > 0)
             IconButton(
               icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
               tooltip: '経由地をクリア',
-              onPressed: () => Navigator.pop(
-                context,
-                const SearchResultAction(type: 'clear_waypoints'),
-              ),
+              onPressed: _confirmAndClearWaypoints,
             )
           else if (!widget.isWaypointMode && widget.hasActiveDestination)
             IconButton(
