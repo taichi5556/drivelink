@@ -233,7 +233,10 @@ class _MainScreenState extends State<MainScreen>
     _shareLocation = false;
     WakelockPlus.enable();
     // Phase C-1: 音声案内サービス初期化（fire-and-forget。完了前の speak は no-op）
-    TtsService.instance.init();
+    // 完了後に setState することで、シート上のトグル Switch が永続化済の状態を反映する
+    TtsService.instance.init().then((_) {
+      if (mounted) setState(() {});
+    });
     // Phase B-5: 自車マーカー位置の補間用 AnimationController。
     // GPS 受信ごとに duration 500ms で _animFrom → _animTo へ tween。
     // listener 内で _displayMyPosition を更新し、_markers の自車だけ高速差替え。
@@ -3683,7 +3686,35 @@ class _MainScreenState extends State<MainScreen>
                   Text(dist, style: flatTextStyle),
                 ],
               ),
-              const SizedBox(height: 14),
+              const SizedBox(height: 8),
+              // Phase C-3: 音声案内 ON/OFF トグル（永続化は TtsService 側で実施）
+              Row(
+                children: [
+                  const Icon(
+                    Icons.volume_up,
+                    size: 20,
+                    color: primaryColor,
+                  ),
+                  const SizedBox(width: 8),
+                  const Text(
+                    '音声案内',
+                    style: TextStyle(
+                      color: primaryColor,
+                      fontSize: 15,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const Spacer(),
+                  Switch.adaptive(
+                    value: TtsService.instance.isEnabled,
+                    onChanged: (v) async {
+                      await TtsService.instance.setEnabled(v);
+                      if (mounted) setState(() {});
+                    },
+                  ),
+                ],
+              ),
+              const SizedBox(height: 4),
               // アクション 4ボタン（既存ヘルパー流用、展開時のみ視認）
               _buildActionButtons(),
             ],
