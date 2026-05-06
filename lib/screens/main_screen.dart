@@ -84,6 +84,8 @@ class _MainScreenState extends State<MainScreen>
   // M-1d: ユーザー追加経由地（順序保持）。via: でルートに通過点として渡す
   final List<LatLng> _waypoints = [];
   final List<String> _waypointNames = [];
+  // M-1d 到着判定: 経由地ごとの「まもなく経由地」発話済みフラグ。_waypoints と同期維持
+  final List<bool> _waypointSaidNear = [];
   StreamSubscription? _appLinkSubscription;
   final _appLinks = AppLinks();
   LatLng? get _activeDestination => _groupDestination;
@@ -1202,6 +1204,7 @@ class _MainScreenState extends State<MainScreen>
     setState(() {
       _waypoints.clear();
       _waypointNames.clear();
+      _waypointSaidNear.clear();
     });
     _rebuildMarkers();
     if (_groupDestination != null) {
@@ -1233,6 +1236,7 @@ class _MainScreenState extends State<MainScreen>
     setState(() {
       _waypoints.add(latLng);
       _waypointNames.add(name);
+      _waypointSaidNear.add(false);
     });
     _rebuildMarkers();              // 経由地マーカーを即時表示
     // 経由地追加はリルート扱い：カメラ広域動作・選択index リセット・5秒タイマー等の
@@ -1253,6 +1257,63 @@ class _MainScreenState extends State<MainScreen>
           duration: const Duration(seconds: 2),
         ),
       );
+    }
+  }
+
+  /// 目的地到着時の状態クリーンアップ。「案内終了」と同等のリセット + SnackBar。
+  /// 音声「目的地に到着しました」は呼出側で既に流す前提。
+  void _onDestinationArrived() {
+    _routeOverviewTimer?.cancel();
+    setState(() {
+      _groupDestination = null;
+      _groupDestName = '';
+      _polylines = {};
+      _routes = [];
+      _selectedRouteIndex = 0;
+      _headingUp = false;
+      _isRoutePreview = false;
+      _isShared = false;
+      _inRouteOverview = false;
+      _waypoints.clear();
+      _waypointNames.clear();
+      _waypointSaidNear.clear();
+    });
+    _animateCameraWithBearing(_myPosition, 0);
+    _rebuildMarkers();
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('🎯 目的地に到着しました'),
+          backgroundColor: Color(0xFF1A3A5C),
+          duration: Duration(seconds: 3),
+        ),
+      );
+    }
+  }
+
+  /// 経由地通過判定。GPS 更新ごとに呼ぶ。
+  /// _waypoints[0]（次の経由地）への直線距離で判定:
+  /// - 100m 以内かつ未発話: 「まもなく経由地」（経由地ごとに 1 回）
+  /// - 30m 以内: 「経由地です」+ 該当経由地除外 + マーカー再描画
+  /// ルート再計算は行わない（既存ポリラインの後続部分で継続）。
+  void _checkWaypointArrival() {
+    if (_waypoints.isEmpty || _isRoutePreview) return;
+    final dist = _metersTo(_myPosition, _waypoints[0]);
+    if (dist < 30) {
+      final name = _waypointNames[0];
+      setState(() {
+        _waypoints.removeAt(0);
+        _waypointNames.removeAt(0);
+        if (_waypointSaidNear.isNotEmpty) _waypointSaidNear.removeAt(0);
+      });
+      _rebuildMarkers();
+      TtsService.instance.speak('経由地です');
+      _appendDebugLog('[経由地通過] $name / 残${_waypoints.length}');
+      return;
+    }
+    if (dist < 100 && _waypointSaidNear.isNotEmpty && !_waypointSaidNear[0]) {
+      setState(() => _waypointSaidNear[0] = true);
+      TtsService.instance.speak('まもなく経由地');
     }
   }
 
@@ -1552,6 +1613,7 @@ class _MainScreenState extends State<MainScreen>
         // M-1d: 新目的地で経由地もリセット（前ルートの経由地は意味を失う）
         _waypoints.clear();
         _waypointNames.clear();
+        _waypointSaidNear.clear();
       });
       _updateDestinationMarker();
       // 「現在地」は履歴に保存しない（既存挙動踏襲）
@@ -1572,6 +1634,7 @@ class _MainScreenState extends State<MainScreen>
         _isShared = false;
         _waypoints.clear();
         _waypointNames.clear();
+        _waypointSaidNear.clear();
       });
       _updateDestinationMarker();
     }
@@ -1735,6 +1798,7 @@ class _MainScreenState extends State<MainScreen>
     _updatePassedRoute();
     _updateCurrentStep(); // B-2: ステップ判定（投影方式 + 3秒デバウンス）
     _updateReverseDetection(); // B-6: 逆走検知（_currentStepIndex を使うため後）
+    _checkWaypointArrival(); // M-1d: 経由地通過判定（音声 + マーカー除去）
     _updateVoiceGuidance(); // C-2: 音声案内（500/100/30m tier で読み上げ）
     _updateRemainingDistanceCheck(); // B-7: 残り距離増加検知（90° ズレ補完）
   }
@@ -1988,6 +2052,8 @@ class _MainScreenState extends State<MainScreen>
 
       if (immediateText != null) {
         TtsService.instance.speak(immediateText);
+        // 末尾 step + 30m 即時発話 = 既に到着 → state リセット
+        if (isLast && initDist < 30) _onDestinationArrived();
         return; // 即時発話したらこの tick の tier 判定はスキップ
       }
     }
@@ -2001,6 +2067,8 @@ class _MainScreenState extends State<MainScreen>
       _announcedTiers.addAll({30, 100, 500});
       final text = isLast ? '目的地に到着しました' : '$maneuverJaです';
       TtsService.instance.speak(text);
+      // 末尾 step + 30m 到達 → 目的地到着、state リセット
+      if (isLast) _onDestinationArrived();
     } else if (distance < 100 && !_announcedTiers.contains(100)) {
       _announcedTiers.addAll({100, 500});
       final text = isLast ? 'まもなく目的地' : 'まもなく$maneuverJa';
@@ -3365,6 +3433,7 @@ class _MainScreenState extends State<MainScreen>
       _inRouteOverview = false;
       _waypoints.clear();
       _waypointNames.clear();
+      _waypointSaidNear.clear();
     });
     _updateDestinationMarker();
     _setPersonalDestination();
@@ -3528,6 +3597,7 @@ class _MainScreenState extends State<MainScreen>
                   _isShared = false;
                   _waypoints.clear();
                   _waypointNames.clear();
+                  _waypointSaidNear.clear();
                 });
                 _animateCameraWithBearing(_myPosition, 0);
                 _updateDestinationMarker();
