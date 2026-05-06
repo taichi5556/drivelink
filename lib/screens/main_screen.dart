@@ -204,6 +204,8 @@ class _MainScreenState extends State<MainScreen>
   // _buildNavigationSheet で計算した実 min/max を animateTo で再利用するためキャッシュ
   double _sheetMinSize = 0.06;
   double _sheetMaxSize = 0.40;
+  // GestureDetector でシート全体を縦ドラッグする際に jumpTo 量を画面比に換算するため parentH を保持
+  double _sheetParentH = 0.0;
 
   // 逸脱判定調査用ログバッファ。最新200行保持。アプリ内ログ画面で表示。
   // 公開版にも入れて常時収集（メモリ消費は微小）。表示のオン/オフは _debugLogEnabled で制御。
@@ -3618,9 +3620,10 @@ class _MainScreenState extends State<MainScreen>
         // 併せてシート展開時にコンテンツが確実に収まるよう保証。
         final minSize = (70.0 / parentH).clamp(0.06, 0.4);
         final maxSize = (200.0 / parentH).clamp(0.12, 0.6);
-        // _expandSheetTemporarily 用にキャッシュ
+        // _expandSheetTemporarily / GestureDetector 用にキャッシュ
         _sheetMinSize = minSize;
         _sheetMaxSize = maxSize;
+        _sheetParentH = parentH;
         return Listener(
           behavior: HitTestBehavior.translucent,
           onPointerDown: (_) {
@@ -3732,13 +3735,50 @@ class _MainScreenState extends State<MainScreen>
       letterSpacing: -0.3,
     );
 
-    return ClipRRect(
-      borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
-      child: BackdropFilter(
-        filter: ui.ImageFilter.blur(sigmaX: 20, sigmaY: 20),
+    // シート全体を縦ドラッグでサイズ変更するための GestureDetector でラップ。
+    // - HitTestBehavior.translucent で子のタップ・horizontal drag は妨げない
+    // - onVerticalDragUpdate: jumpTo で finger に追従、auto collapse タイマーをキャンセル
+    // - onVerticalDragEnd: velocity > 300 px/s なら fling、それ未満は中点ベース snap
+    //   （iOS Apple Music / マップ ETA 風の操作感）
+    return GestureDetector(
+      behavior: HitTestBehavior.translucent,
+      onVerticalDragUpdate: (details) {
+        if (!_sheetController.isAttached || _sheetParentH <= 0) return;
+        final newSize =
+            (_sheetController.size - details.delta.dy / _sheetParentH)
+                .clamp(_sheetMinSize, _sheetMaxSize);
+        _sheetController.jumpTo(newSize);
+        _sheetAutoCollapseTimer?.cancel();
+        _sheetAutoCollapseTimer = null;
+      },
+      onVerticalDragEnd: (details) {
+        if (!_sheetController.isAttached) return;
+        final velocity = details.primaryVelocity ?? 0;
+        const flingThreshold = 300.0; // px/s（Apple 標準的閾値）
+        final double target;
+        if (velocity.abs() > flingThreshold) {
+          // 下向き fling → 折りたたみ、上向き fling → 展開
+          target = velocity > 0 ? _sheetMinSize : _sheetMaxSize;
+        } else {
+          // 低速時は中点ベースの位置 snap
+          final midpoint = (_sheetMinSize + _sheetMaxSize) / 2;
+          target = _sheetController.size < midpoint
+              ? _sheetMinSize
+              : _sheetMaxSize;
+        }
+        _sheetController.animateTo(
+          target,
+          duration: const Duration(milliseconds: 200),
+          curve: Curves.easeOut,
+        );
+        _scheduleAutoCollapseAfterInteraction();
+      },
+      child: ClipRRect(
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
         child: Container(
+          // BackdropFilter 削除（GPU 負荷削減・発熱対策）。alpha 0.25 → 0.85 で文字可読性確保。
           decoration: BoxDecoration(
-            color: Colors.white.withValues(alpha: 0.25),
+            color: Colors.white.withValues(alpha: 0.85),
             border: Border(
               top: BorderSide(
                 color: Colors.white.withValues(alpha: 0.5),
