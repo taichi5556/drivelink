@@ -1047,9 +1047,7 @@ class _MainScreenState extends State<MainScreen>
   // Marker 側で anchor=(0.5, 0.308) を指定して円中心(72,32)が地点位置に来るようにする。
   Future<BitmapDescriptor> _getVehicleMarker(String vehicleType, bool isMe, String nickname) async {
     final key = '$vehicleType-$isMe-$nickname';
-    debugPrint('[icon] ENTRY key=$key');
-    debugPrint('[icon] req key=$key cacheHit=${_markerCache.containsKey(key)}');
-    if (_markerCache.containsKey(key)) return _markerCache[key]!;
+            if (_markerCache.containsKey(key)) return _markerCache[key]!;
 
     final emoji = vehicleType == 'bike' ? '🏍' : '🚗';
     final bgColor = isMe ? const Color(0xFF1E90FF) : const Color(0xFFFF6B35);
@@ -1135,10 +1133,8 @@ class _MainScreenState extends State<MainScreen>
     final picture = recorder.endRecording();
     final image = await picture.toImage(canvasWidth.toInt(), canvasHeight.toInt());
     final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
-    debugPrint('[icon] generated key=$key bytes=${bytes?.lengthInBytes ?? "null"}');
-    if (bytes == null) {
-      debugPrint('[icon] FALLBACK to defaultMarker key=$key');
-      return BitmapDescriptor.defaultMarker;
+        if (bytes == null) {
+            return BitmapDescriptor.defaultMarker;
     }
     // imagePixelRatio: 2.5 → 画面上の表示サイズ = 64 / 2.5 ≈ 25.6dp（円部分）
     final descriptor = BitmapDescriptor.bytes(
@@ -1150,13 +1146,7 @@ class _MainScreenState extends State<MainScreen>
   }
 
   Future<void> _rebuildMarkers() async {
-    debugPrint(
-      '[rebuild] members=${_members.length} keys=${_members.keys.toList()} '
-      'displayPos=${_displayMyPosition.latitude.toStringAsFixed(4)},'
-      '${_displayMyPosition.longitude.toStringAsFixed(4)} '
-      'firstFix=$_hasFirstFix share=$_shareLocation',
-    );
-    // メンバーマーカーを再構築（警告マーカーを含む全マーカーを同期）
+        // メンバーマーカーを再構築（警告マーカーを含む全マーカーを同期）
     final newMarkers = <Marker>{};
 
     // メンバーマーカー
@@ -1169,17 +1159,12 @@ class _MainScreenState extends State<MainScreen>
       final nick = m['nickname'] as String? ?? '';
       final vehicleType = m['vehicle_type'] as String? ?? 'car';
       final isMe = uid == widget.userId;
-      debugPrint('[rebuild] calling _getVehicleMarker for uid=$uid isMe=$isMe');
-      final icon = await _getVehicleMarker(vehicleType, isMe, nick);
+            final icon = await _getVehicleMarker(vehicleType, isMe, nick);
       final stale = !isMe && _isStale(m);
       // Phase B-5: 自車だけ補間後の表示位置を使う（ジャンプを tween で滑らかに見せる）
       final pos = isMe ? _displayMyPosition : LatLng(lat, lng);
       if (isMe) {
-        debugPrint(
-          '[rebuild] adding self marker pos=${pos.latitude.toStringAsFixed(4)},'
-          '${pos.longitude.toStringAsFixed(4)} iconType=${icon == BitmapDescriptor.defaultMarker ? "default" : "custom"}',
-        );
-      }
+              }
       newMarkers.add(Marker(
         markerId: MarkerId(uid),
         position: pos,
@@ -1773,12 +1758,8 @@ class _MainScreenState extends State<MainScreen>
         .listen(
       (event) {
         final data = event.snapshot.value as Map?;
-        debugPrint(
-          '[Firebase listener] data=${data == null ? "null" : "len=${data.length} keys=${data.keys.toList()}"}',
-        );
-        if (data == null) {
-          debugPrint('[Firebase listener] data=null, _members=${_members.length}');
-          return;
+                if (data == null) {
+                    return;
         }
         final updated = <String, dynamic>{};
         data.forEach((k, v) => updated[k.toString()] = v);
@@ -1833,12 +1814,7 @@ class _MainScreenState extends State<MainScreen>
   Future<void> _handlePositionUpdate(Position pos) async {
     if (!mounted) return;
     final newPos = LatLng(pos.latitude, pos.longitude);
-    debugPrint(
-      '[GPS] newPos=${newPos.latitude.toStringAsFixed(4)},'
-      '${newPos.longitude.toStringAsFixed(4)} firstFix=$_hasFirstFix '
-      'share=$_shareLocation',
-    );
-    // Phase B-5: 自車マーカーの tween を駆動（生 _myPosition は別途 setState で更新）
+        // Phase B-5: 自車マーカーの tween を駆動（生 _myPosition は別途 setState で更新）
     // 初回はデフォルト東京座標から長距離 tween しないようスナップ。
     if (!_hasFirstFix) {
       _hasFirstFix = true;
@@ -1868,10 +1844,8 @@ class _MainScreenState extends State<MainScreen>
         'vehicle_type': widget.vehicleType,
         'last_seen': DateTime.now().millisecondsSinceEpoch,
       });
-      debugPrint('[GPS write] success share=true');
-    } else {
-      debugPrint('[GPS write] skip share=false');
-    }
+          } else {
+          }
     if (!mounted) return;
     // 追従停止中（_isFollowingMember==true）はヘディングアップでもカメラを動かさない
     if (!_inRouteOverview && !_isFollowingMember) {
@@ -1929,8 +1903,7 @@ class _MainScreenState extends State<MainScreen>
           'vehicle_type': widget.vehicleType,
           'last_seen': DateTime.now().millisecondsSinceEpoch,
         });
-        debugPrint('[updateLocation write] success share=true pos=${pos.latitude.toStringAsFixed(4)},${pos.longitude.toStringAsFixed(4)}');
-        // BUGFIX: Firebase realtime DB は自分書込時に listener 再発火しないため、
+                // BUGFIX: Firebase realtime DB は自分書込時に listener 再発火しないため、
         // _members を直接更新して _rebuildMarkers を呼ぶ。これがないと自分の
         // マーカーが地図に出ない（_members[uid] に lat/lng が無いまま skip される）
         if (mounted) {
@@ -1944,11 +1917,9 @@ class _MainScreenState extends State<MainScreen>
             };
           });
           _rebuildMarkers();
-          debugPrint('[updateLocation write] _members updated locally + _rebuildMarkers triggered');
-        }
+                  }
       } else {
-        debugPrint('[updateLocation write] skip share=false');
-      }
+              }
       if (!mounted) return;
       // 追従停止中（_isFollowingMember==true）はヘディングアップでもカメラを動かさない
       if (!_inRouteOverview && !_isFollowingMember) {
@@ -2094,8 +2065,7 @@ class _MainScreenState extends State<MainScreen>
     // 同じ候補が継続 → 経過時間チェック
     if (_pendingSince != null &&
         DateTime.now().difference(_pendingSince!) >= _stepDebounceDuration) {
-      debugPrint('[B-2] step 切替: $_currentStepIndex → $candidate (debounce 3s 経過)');
-      _currentStepIndex = candidate;
+            _currentStepIndex = candidate;
       _pendingStepIndex = null;
       _pendingSince = null;
     }
@@ -2877,14 +2847,7 @@ class _MainScreenState extends State<MainScreen>
 
   Future<void> _toggleLocationSharing() async {
     final newValue = !_shareLocation;
-    debugPrint('[toggle] called new=$newValue');
-    debugPrint(
-      '[toggle] start: $_shareLocation → $newValue '
-      'firstFix=$_hasFirstFix members=${_members.length} '
-      'displayPos=${_displayMyPosition.latitude.toStringAsFixed(4)},'
-      '${_displayMyPosition.longitude.toStringAsFixed(4)}',
-    );
-    setState(() => _shareLocation = newValue);
+            setState(() => _shareLocation = newValue);
     if (!newValue) {
       // OFF: Firebaseから自分の位置情報を削除（他ユーザーに見えなくなる）
       await _db.child('rooms/${widget.roomCode}/members/${widget.userId}').remove();
@@ -2895,18 +2858,12 @@ class _MainScreenState extends State<MainScreen>
           _members.remove(widget.userId);
         });
         _rebuildMarkers();
-        debugPrint('[toggle OFF] _members removed locally + _rebuildMarkers triggered');
-      }
+              }
     } else {
       // ON: 即座に現在位置をFirebaseに送信
       await _updateLocation();
     }
-    debugPrint(
-      '[toggle] end: share=$_shareLocation members=${_members.length} '
-      'displayPos=${_displayMyPosition.latitude.toStringAsFixed(4)},'
-      '${_displayMyPosition.longitude.toStringAsFixed(4)}',
-    );
-  }
+      }
 
   void _showQrDialog() {
     showDialog(
@@ -3017,10 +2974,7 @@ class _MainScreenState extends State<MainScreen>
               inactiveThumbColor: Colors.grey,
               materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
               onChanged: (newValue) {
-                debugPrint(
-                  '[Switch] tapped new=$newValue old=$_shareLocation',
-                );
-                _toggleLocationSharing();
+                                _toggleLocationSharing();
               },
             ),
           ],
