@@ -1930,6 +1930,22 @@ class _MainScreenState extends State<MainScreen>
           'last_seen': DateTime.now().millisecondsSinceEpoch,
         });
         debugPrint('[updateLocation write] success share=true pos=${pos.latitude.toStringAsFixed(4)},${pos.longitude.toStringAsFixed(4)}');
+        // BUGFIX: Firebase realtime DB は自分書込時に listener 再発火しないため、
+        // _members を直接更新して _rebuildMarkers を呼ぶ。これがないと自分の
+        // マーカーが地図に出ない（_members[uid] に lat/lng が無いまま skip される）
+        if (mounted) {
+          setState(() {
+            _members[widget.userId] = {
+              'nickname': widget.nickname,
+              'lat': pos.latitude,
+              'lng': pos.longitude,
+              'vehicle_type': widget.vehicleType,
+              'last_seen': DateTime.now().millisecondsSinceEpoch,
+            };
+          });
+          _rebuildMarkers();
+          debugPrint('[updateLocation write] _members updated locally + _rebuildMarkers triggered');
+        }
       } else {
         debugPrint('[updateLocation write] skip share=false');
       }
