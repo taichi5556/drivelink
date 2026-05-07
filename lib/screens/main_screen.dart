@@ -1047,8 +1047,8 @@ class _MainScreenState extends State<MainScreen>
   // Marker 側で anchor=(0.5, 0.308) を指定して円中心(72,32)が地点位置に来るようにする。
   Future<BitmapDescriptor> _getVehicleMarker(String vehicleType, bool isMe, String nickname) async {
     final key = '$vehicleType-$isMe-$nickname';
-    _appendDebugLog('[icon] ENTRY key=$key');
-    _appendDebugLog('[icon] req key=$key cacheHit=${_markerCache.containsKey(key)}');
+    debugPrint('[icon] ENTRY key=$key');
+    debugPrint('[icon] req key=$key cacheHit=${_markerCache.containsKey(key)}');
     if (_markerCache.containsKey(key)) return _markerCache[key]!;
 
     final emoji = vehicleType == 'bike' ? '🏍' : '🚗';
@@ -1135,9 +1135,9 @@ class _MainScreenState extends State<MainScreen>
     final picture = recorder.endRecording();
     final image = await picture.toImage(canvasWidth.toInt(), canvasHeight.toInt());
     final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
-    _appendDebugLog('[icon] generated key=$key bytes=${bytes?.lengthInBytes ?? "null"}');
+    debugPrint('[icon] generated key=$key bytes=${bytes?.lengthInBytes ?? "null"}');
     if (bytes == null) {
-      _appendDebugLog('[icon] FALLBACK to defaultMarker key=$key');
+      debugPrint('[icon] FALLBACK to defaultMarker key=$key');
       return BitmapDescriptor.defaultMarker;
     }
     // imagePixelRatio: 2.5 → 画面上の表示サイズ = 64 / 2.5 ≈ 25.6dp（円部分）
@@ -1150,7 +1150,7 @@ class _MainScreenState extends State<MainScreen>
   }
 
   Future<void> _rebuildMarkers() async {
-    _appendDebugLog(
+    debugPrint(
       '[rebuild] members=${_members.length} keys=${_members.keys.toList()} '
       'displayPos=${_displayMyPosition.latitude.toStringAsFixed(4)},'
       '${_displayMyPosition.longitude.toStringAsFixed(4)} '
@@ -1169,13 +1169,13 @@ class _MainScreenState extends State<MainScreen>
       final nick = m['nickname'] as String? ?? '';
       final vehicleType = m['vehicle_type'] as String? ?? 'car';
       final isMe = uid == widget.userId;
-      _appendDebugLog('[rebuild] calling _getVehicleMarker for uid=$uid isMe=$isMe');
+      debugPrint('[rebuild] calling _getVehicleMarker for uid=$uid isMe=$isMe');
       final icon = await _getVehicleMarker(vehicleType, isMe, nick);
       final stale = !isMe && _isStale(m);
       // Phase B-5: 自車だけ補間後の表示位置を使う（ジャンプを tween で滑らかに見せる）
       final pos = isMe ? _displayMyPosition : LatLng(lat, lng);
       if (isMe) {
-        _appendDebugLog(
+        debugPrint(
           '[rebuild] adding self marker pos=${pos.latitude.toStringAsFixed(4)},'
           '${pos.longitude.toStringAsFixed(4)} iconType=${icon == BitmapDescriptor.defaultMarker ? "default" : "custom"}',
         );
@@ -1773,11 +1773,11 @@ class _MainScreenState extends State<MainScreen>
         .listen(
       (event) {
         final data = event.snapshot.value as Map?;
-        _appendDebugLog(
+        debugPrint(
           '[Firebase listener] data=${data == null ? "null" : "len=${data.length} keys=${data.keys.toList()}"}',
         );
         if (data == null) {
-          _appendDebugLog('[Firebase listener] data=null, _members=${_members.length}');
+          debugPrint('[Firebase listener] data=null, _members=${_members.length}');
           return;
         }
         final updated = <String, dynamic>{};
@@ -1833,7 +1833,7 @@ class _MainScreenState extends State<MainScreen>
   Future<void> _handlePositionUpdate(Position pos) async {
     if (!mounted) return;
     final newPos = LatLng(pos.latitude, pos.longitude);
-    _appendDebugLog(
+    debugPrint(
       '[GPS] newPos=${newPos.latitude.toStringAsFixed(4)},'
       '${newPos.longitude.toStringAsFixed(4)} firstFix=$_hasFirstFix '
       'share=$_shareLocation',
@@ -1868,9 +1868,9 @@ class _MainScreenState extends State<MainScreen>
         'vehicle_type': widget.vehicleType,
         'last_seen': DateTime.now().millisecondsSinceEpoch,
       });
-      _appendDebugLog('[GPS write] success share=true');
+      debugPrint('[GPS write] success share=true');
     } else {
-      _appendDebugLog('[GPS write] skip share=false');
+      debugPrint('[GPS write] skip share=false');
     }
     if (!mounted) return;
     // 追従停止中（_isFollowingMember==true）はヘディングアップでもカメラを動かさない
@@ -1929,9 +1929,9 @@ class _MainScreenState extends State<MainScreen>
           'vehicle_type': widget.vehicleType,
           'last_seen': DateTime.now().millisecondsSinceEpoch,
         });
-        _appendDebugLog('[updateLocation write] success share=true pos=${pos.latitude.toStringAsFixed(4)},${pos.longitude.toStringAsFixed(4)}');
+        debugPrint('[updateLocation write] success share=true pos=${pos.latitude.toStringAsFixed(4)},${pos.longitude.toStringAsFixed(4)}');
       } else {
-        _appendDebugLog('[updateLocation write] skip share=false');
+        debugPrint('[updateLocation write] skip share=false');
       }
       if (!mounted) return;
       // 追従停止中（_isFollowingMember==true）はヘディングアップでもカメラを動かさない
@@ -2861,8 +2861,8 @@ class _MainScreenState extends State<MainScreen>
 
   Future<void> _toggleLocationSharing() async {
     final newValue = !_shareLocation;
-    _appendDebugLog('[toggle] called new=$newValue');
-    _appendDebugLog(
+    debugPrint('[toggle] called new=$newValue');
+    debugPrint(
       '[toggle] start: $_shareLocation → $newValue '
       'firstFix=$_hasFirstFix members=${_members.length} '
       'displayPos=${_displayMyPosition.latitude.toStringAsFixed(4)},'
@@ -2876,7 +2876,7 @@ class _MainScreenState extends State<MainScreen>
       // ON: 即座に現在位置をFirebaseに送信
       await _updateLocation();
     }
-    _appendDebugLog(
+    debugPrint(
       '[toggle] end: share=$_shareLocation members=${_members.length} '
       'displayPos=${_displayMyPosition.latitude.toStringAsFixed(4)},'
       '${_displayMyPosition.longitude.toStringAsFixed(4)}',
@@ -2992,7 +2992,7 @@ class _MainScreenState extends State<MainScreen>
               inactiveThumbColor: Colors.grey,
               materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
               onChanged: (newValue) {
-                _appendDebugLog(
+                debugPrint(
                   '[Switch] tapped new=$newValue old=$_shareLocation',
                 );
                 _toggleLocationSharing();
