@@ -1047,6 +1047,7 @@ class _MainScreenState extends State<MainScreen>
   // Marker 側で anchor=(0.5, 0.308) を指定して円中心(72,32)が地点位置に来るようにする。
   Future<BitmapDescriptor> _getVehicleMarker(String vehicleType, bool isMe, String nickname) async {
     final key = '$vehicleType-$isMe-$nickname';
+    _appendDebugLog('[icon] ENTRY key=$key');
     _appendDebugLog('[icon] req key=$key cacheHit=${_markerCache.containsKey(key)}');
     if (_markerCache.containsKey(key)) return _markerCache[key]!;
 
@@ -1168,6 +1169,7 @@ class _MainScreenState extends State<MainScreen>
       final nick = m['nickname'] as String? ?? '';
       final vehicleType = m['vehicle_type'] as String? ?? 'car';
       final isMe = uid == widget.userId;
+      _appendDebugLog('[rebuild] calling _getVehicleMarker for uid=$uid isMe=$isMe');
       final icon = await _getVehicleMarker(vehicleType, isMe, nick);
       final stale = !isMe && _isStale(m);
       // Phase B-5: 自車だけ補間後の表示位置を使う（ジャンプを tween で滑らかに見せる）
