@@ -1774,7 +1774,10 @@ class _MainScreenState extends State<MainScreen>
         _appendDebugLog(
           '[Firebase listener] data=${data == null ? "null" : "len=${data.length} keys=${data.keys.toList()}"}',
         );
-        if (data == null) return;
+        if (data == null) {
+          _appendDebugLog('[Firebase listener] data=null, _members=${_members.length}');
+          return;
+        }
         final updated = <String, dynamic>{};
         data.forEach((k, v) => updated[k.toString()] = v);
         if (mounted) {
