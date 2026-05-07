@@ -2839,6 +2839,7 @@ class _MainScreenState extends State<MainScreen>
 
   Future<void> _toggleLocationSharing() async {
     final newValue = !_shareLocation;
+    _appendDebugLog('[toggle] called new=$newValue');
     _appendDebugLog(
       '[toggle] start: $_shareLocation → $newValue '
       'firstFix=$_hasFirstFix members=${_members.length} '
@@ -2968,7 +2969,12 @@ class _MainScreenState extends State<MainScreen>
               activeThumbColor: Colors.green,
               inactiveThumbColor: Colors.grey,
               materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-              onChanged: (_) => _toggleLocationSharing(),
+              onChanged: (newValue) {
+                _appendDebugLog(
+                  '[Switch] tapped new=$newValue old=$_shareLocation',
+                );
+                _toggleLocationSharing();
+              },
             ),
           ],
         ),
