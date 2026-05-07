@@ -39,6 +39,8 @@
 	<false/>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>ルーム参加のためQRコードを読み取ります</string>
 	<key>NSLocationAlwaysUsageDescription</key>
 	<string>ドライブ中のメンバーと位置情報を共有するために使用します</string>
 	<key>NSLocationWhenInUseUsageDescription</key>

@@ -11,6 +11,7 @@ import 'main_screen.dart';
 import 'package:app_links/app_links.dart';
 import 'dart:async';
 import '../services/room_history.dart';
+import 'qr_scanner_screen.dart';
 
 class LoginScreen extends StatefulWidget {
   static String lastProcessedCode = '';
@@ -94,6 +95,42 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
     } else {
       await RoomHistory.clear();
     }
+  }
+
+  /// QR コード読み取り画面を開き、検出した文字列からルームコードを抽出して入力欄にセット。
+  Future<void> _openQrScanner() async {
+    final scanned = await Navigator.push<String?>(
+      context,
+      MaterialPageRoute(builder: (_) => const QrScannerScreen()),
+    );
+    if (scanned == null || !mounted) return;
+    final code = _extractRoomCode(scanned);
+    if (code == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(_isJapanese
+              ? 'QRコードからルームコードを取得できませんでした'
+              : 'Could not extract room code from QR'),
+        ),
+      );
+      return;
+    }
+    setState(() => _roomController.text = code);
+  }
+
+  /// 入力文字列からルームコード抽出。
+  /// - URL（https://drivelink-a7ffb.web.app/join?room=XXX or drivevoice://join?room=XXX）
+  ///   は room パラメータを抽出
+  /// - プレーンな英数字（4〜16文字）はそのまま採用
+  String? _extractRoomCode(String input) {
+    final uri = Uri.tryParse(input);
+    if (uri != null && uri.queryParameters.containsKey('room')) {
+      final code = uri.queryParameters['room']?.toUpperCase();
+      if (code != null && code.isNotEmpty) return code;
+    }
+    final plain = input.trim().toUpperCase();
+    if (RegExp(r'^[A-Z0-9]{4,16}$').hasMatch(plain)) return plain;
+    return null;
   }
 
   /// 保存情報を使って即ルーム入室（Firebase上の最新期限を再確認してから遷移）
@@ -734,6 +771,13 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
                     contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 18),
                   ),
                 ),
+              ),
+              const SizedBox(height: 8),
+              // QR コード読み取りボタン（ルームコード入力欄の直下）
+              _buildGradientButton(
+                _isJapanese ? '📷 QRコードを読み取る' : '📷 Scan QR Code',
+                Icons.qr_code_scanner,
+                _isLoading ? null : _openQrScanner,
               ),
             ],
             if (_createdRoomCode != null) ...[
