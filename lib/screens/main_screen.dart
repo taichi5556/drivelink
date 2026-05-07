@@ -1852,6 +1852,9 @@ class _MainScreenState extends State<MainScreen>
         'vehicle_type': widget.vehicleType,
         'last_seen': DateTime.now().millisecondsSinceEpoch,
       });
+      _appendDebugLog('[GPS write] success share=true');
+    } else {
+      _appendDebugLog('[GPS write] skip share=false');
     }
     if (!mounted) return;
     // 追従停止中（_isFollowingMember==true）はヘディングアップでもカメラを動かさない
@@ -1910,6 +1913,9 @@ class _MainScreenState extends State<MainScreen>
           'vehicle_type': widget.vehicleType,
           'last_seen': DateTime.now().millisecondsSinceEpoch,
         });
+        _appendDebugLog('[updateLocation write] success share=true pos=${pos.latitude.toStringAsFixed(4)},${pos.longitude.toStringAsFixed(4)}');
+      } else {
+        _appendDebugLog('[updateLocation write] skip share=false');
       }
       if (!mounted) return;
       // 追従停止中（_isFollowingMember==true）はヘディングアップでもカメラを動かさない
