@@ -1144,6 +1144,12 @@ class _MainScreenState extends State<MainScreen>
   }
 
   Future<void> _rebuildMarkers() async {
+    _appendDebugLog(
+      '[rebuild] members=${_members.length} keys=${_members.keys.toList()} '
+      'displayPos=${_displayMyPosition.latitude.toStringAsFixed(4)},'
+      '${_displayMyPosition.longitude.toStringAsFixed(4)} '
+      'firstFix=$_hasFirstFix share=$_shareLocation',
+    );
     // メンバーマーカーを再構築（警告マーカーを含む全マーカーを同期）
     final newMarkers = <Marker>{};
 
@@ -1754,6 +1760,9 @@ class _MainScreenState extends State<MainScreen>
         .listen(
       (event) {
         final data = event.snapshot.value as Map?;
+        _appendDebugLog(
+          '[Firebase listener] data=${data == null ? "null" : "len=${data.length} keys=${data.keys.toList()}"}',
+        );
         if (data == null) return;
         final updated = <String, dynamic>{};
         data.forEach((k, v) => updated[k.toString()] = v);
@@ -1808,6 +1817,11 @@ class _MainScreenState extends State<MainScreen>
   Future<void> _handlePositionUpdate(Position pos) async {
     if (!mounted) return;
     final newPos = LatLng(pos.latitude, pos.longitude);
+    _appendDebugLog(
+      '[GPS] newPos=${newPos.latitude.toStringAsFixed(4)},'
+      '${newPos.longitude.toStringAsFixed(4)} firstFix=$_hasFirstFix '
+      'share=$_shareLocation',
+    );
     // Phase B-5: 自車マーカーの tween を駆動（生 _myPosition は別途 setState で更新）
     // 初回はデフォルト東京座標から長距離 tween しないようスナップ。
     if (!_hasFirstFix) {
@@ -2825,6 +2839,12 @@ class _MainScreenState extends State<MainScreen>
 
   Future<void> _toggleLocationSharing() async {
     final newValue = !_shareLocation;
+    _appendDebugLog(
+      '[toggle] start: $_shareLocation → $newValue '
+      'firstFix=$_hasFirstFix members=${_members.length} '
+      'displayPos=${_displayMyPosition.latitude.toStringAsFixed(4)},'
+      '${_displayMyPosition.longitude.toStringAsFixed(4)}',
+    );
     setState(() => _shareLocation = newValue);
     if (!newValue) {
       // OFF: Firebaseから自分の位置情報を削除（他ユーザーに見えなくなる）
@@ -2833,6 +2853,11 @@ class _MainScreenState extends State<MainScreen>
       // ON: 即座に現在位置をFirebaseに送信
       await _updateLocation();
     }
+    _appendDebugLog(
+      '[toggle] end: share=$_shareLocation members=${_members.length} '
+      'displayPos=${_displayMyPosition.latitude.toStringAsFixed(4)},'
+      '${_displayMyPosition.longitude.toStringAsFixed(4)}',
+    );
   }
 
   void _showQrDialog() {
