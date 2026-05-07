@@ -2888,6 +2888,15 @@ class _MainScreenState extends State<MainScreen>
     if (!newValue) {
       // OFF: Firebaseから自分の位置情報を削除（他ユーザーに見えなくなる）
       await _db.child('rooms/${widget.roomCode}/members/${widget.userId}').remove();
+      // BUGFIX: ON 修正と対称的な対応。listener が自分書込で発火しないため、
+      // _members からも自分を直接削除 + _rebuildMarkers を呼ぶ
+      if (mounted) {
+        setState(() {
+          _members.remove(widget.userId);
+        });
+        _rebuildMarkers();
+        debugPrint('[toggle OFF] _members removed locally + _rebuildMarkers triggered');
+      }
     } else {
       // ON: 即座に現在位置をFirebaseに送信
       await _updateLocation();
