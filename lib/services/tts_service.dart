@@ -35,6 +35,14 @@ class TtsService {
       // Android では setIosAudioCategory は no-op（例外時もスキップ）
     }
 
+    try {
+      // Android: USAGE_ASSISTANCE_NAVIGATION_GUIDANCE を設定。
+      // 画面ロック中・他アプリ実行中もナビ音声を鳴らすため必須。
+      await _tts.setAudioAttributesForNavigation();
+    } catch (_) {
+      // iOS では未実装（no-op）
+    }
+
     await _tts.setLanguage('ja-JP');
     await _tts.setSpeechRate(0.5);
     await _tts.setVolume(1.0);
