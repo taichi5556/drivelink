@@ -51,6 +51,11 @@ class _MainScreenState extends State<MainScreen>
   DateTime? _lastProgrammaticMoveAt;
   // この時間以内のonCameraMoveStartedはプログラム由来とみなす（ms）
   static const _programmaticMoveGuardMs = 100;
+  // バックグラウンドからの復帰直後は GoogleMap widget の再構成や GPS 再取得で
+  // onCameraMoveStarted が誤発火し、追従が解除されてしまうケースがある。
+  // 復帰時刻を記録しておき、一定時間内の発火はプログラム由来とみなす。
+  DateTime? _lastResumedAt;
+  static const _resumeGuardMs = 1500;
   Set<Marker> _markers = {};
   // 生 GPS 値。ステップ判定 / 逸脱判定 / 距離計算など全ロジックで使用。
   LatLng _myPosition = const LatLng(35.6812, 139.7671);
@@ -312,6 +317,20 @@ class _MainScreenState extends State<MainScreen>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
+      // 復帰前の追従状態を記憶（_isFollowingMember=false が追従中）
+      final wasFollowing = !_isFollowingMember;
+      // 復帰直後の onCameraMoveStarted 誤発火による追従解除を防ぐためのガード起点
+      _lastResumedAt = DateTime.now();
+      // iOS では onCameraMoveStarted が resume guard 期限後に遅延発火し、
+      // 追従が解除されてしまうケースがある。その保険として、復帰前が追従中
+      // なら一定時間後に強制復元する。
+      if (wasFollowing) {
+        Future.delayed(const Duration(milliseconds: 2500), () {
+          if (mounted && _isFollowingMember) {
+            setState(() => _isFollowingMember = false);
+          }
+        });
+      }
       // GPS 偽装中は復帰時の GPS 再起動をスキップ（意図しない解除を回避）
       if (_gpsSpoofEnabled) return;
       _locationSubscription?.cancel();
@@ -3107,6 +3126,12 @@ class _MainScreenState extends State<MainScreen>
           if (_lastProgrammaticMoveAt != null &&
               DateTime.now().difference(_lastProgrammaticMoveAt!).inMilliseconds <
                   _programmaticMoveGuardMs) {
+            return;
+          }
+          // 復帰直後の誤発火（GoogleMap 再構成や GPS 再取得起因）もプログラム由来扱い
+          if (_lastResumedAt != null &&
+              DateTime.now().difference(_lastResumedAt!).inMilliseconds <
+                  _resumeGuardMs) {
             return;
           }
           setState(() => _isFollowingMember = true);
